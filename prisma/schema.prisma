@@ -104,6 +104,10 @@ model Dokumen {
   shareToken      String?
   shareUrl        String?
   jenis           String       @default("AKAD") // AKAD | BUKTI | LAINNYA
+  // Asal berkas, penentu sejauh mana bot boleh mengubahnya:
+  // UNGGAH = bot yang menaruhnya di folder transaksi (boleh rename & hapus berkas),
+  // TAUTAN = berkas milik orang lain yang cuma ditunjuk (hanya boleh dilepas).
+  sumber          String       @default("UNGGAH") // UNGGAH | TAUTAN
   diunggahOlehId  Int
   diunggahOleh    Operator     @relation("DiunggahOleh", fields: [diunggahOlehId], references: [id])
   createdAt       DateTime     @default(now())

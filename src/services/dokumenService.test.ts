@@ -63,6 +63,10 @@ vi.mock("../config.js", () => ({
 const {
   folderMuamalah,
   simpanDokumen,
+  daftarkanDokumenDariTautan,
+  hapusDokumen,
+  DokumenGandaError,
+  DokumenTautanError,
   ubahNamaDokumen,
   sinkronDokumen,
   sinkronTemplate,
@@ -198,12 +202,12 @@ describe("sinkronDokumen", () => {
     ]);
     prisma.dokumen.findMany.mockResolvedValue([
       { id: 1, remotePath: `${folder}/lama.pdf` },
-      { id: 2, remotePath: `${folder}/sudah-dihapus.pdf` },
+      { id: 2, remotePath: `${folder}/sudah-dihapus.pdf`, sumber: "UNGGAH" },
     ]);
 
     const hasil = await sinkronDokumen(muamalah, 1);
 
-    expect(hasil).toEqual({ ditambah: 1, dihapus: 1 });
+    expect(hasil).toEqual({ ditambah: 1, dihapus: 1, disegarkan: 0 });
     expect(prisma.dokumen.create).toHaveBeenCalledTimes(1);
     expect(prisma.dokumen.create.mock.calls[0][0].data).toMatchObject({
       namaFile: "baru.pdf",
@@ -219,9 +223,148 @@ describe("sinkronDokumen", () => {
     ]);
     prisma.dokumen.findMany.mockResolvedValue([{ id: 1, remotePath: `${folder}/a.pdf` }]);
 
-    expect(await sinkronDokumen(muamalah, 1)).toEqual({ ditambah: 0, dihapus: 0 });
+    expect(await sinkronDokumen(muamalah, 1)).toEqual({
+      ditambah: 0,
+      dihapus: 0,
+      disegarkan: 0,
+    });
     expect(prisma.dokumen.create).not.toHaveBeenCalled();
     expect(prisma.dokumen.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("tidak melepas dokumen bertaut hanya karena berkasnya di luar folder transaksi", async () => {
+    // Regresi: dokumen bertaut memang tidak muncul di daftar folder transaksi.
+    // Kalau ketidakhadiran itu dianggap "berkas hilang", semua dokumen bertaut
+    // akan lenyap tiap kali operator menekan 🔄 Sinkron.
+    const luar = `${BASE}/Qardh/arsip-lama/Akad 001.pdf`;
+    nextcloud.daftarBerkas.mockResolvedValue([]);
+    prisma.dokumen.findMany.mockResolvedValue([
+      { id: 5, remotePath: luar, sumber: "TAUTAN", namaFile: "Akad 001.pdf", ukuran: 10, mimeType: "application/pdf" },
+    ]);
+    nextcloud.infoBerkas.mockResolvedValue({
+      path: luar, nama: "Akad 001.pdf", ukuran: 10, mimeType: "application/pdf", diubahPada: null,
+    });
+
+    const hasil = await sinkronDokumen(muamalah, 1);
+
+    expect(hasil).toEqual({ ditambah: 0, dihapus: 0, disegarkan: 0 });
+    expect(prisma.dokumen.deleteMany).not.toHaveBeenCalled();
+  });
+
+  it("menyegarkan metadata dokumen bertaut yang berubah di Nextcloud", async () => {
+    const luar = `${BASE}/Qardh/arsip-lama/Akad 001.pdf`;
+    nextcloud.daftarBerkas.mockResolvedValue([]);
+    prisma.dokumen.findMany.mockResolvedValue([
+      { id: 5, remotePath: luar, sumber: "TAUTAN", namaFile: "Akad 001.pdf", ukuran: 10, mimeType: "application/pdf" },
+    ]);
+    nextcloud.infoBerkas.mockResolvedValue({
+      path: luar, nama: "Akad 001 revisi.pdf", ukuran: 99, mimeType: "application/pdf", diubahPada: null,
+    });
+
+    const hasil = await sinkronDokumen(muamalah, 1);
+
+    expect(hasil.disegarkan).toBe(1);
+    expect(prisma.dokumen.update.mock.calls[0][0].data).toMatchObject({
+      namaFile: "Akad 001 revisi.pdf",
+      ukuran: 99,
+    });
+  });
+
+  it("melepas dokumen bertaut kalau berkasnya benar-benar sudah tidak ada", async () => {
+    nextcloud.daftarBerkas.mockResolvedValue([]);
+    prisma.dokumen.findMany.mockResolvedValue([
+      { id: 6, remotePath: "/di/luar/hilang.pdf", sumber: "TAUTAN" },
+    ]);
+    nextcloud.infoBerkas.mockResolvedValue(null);
+
+    const hasil = await sinkronDokumen(muamalah, 1);
+
+    expect(hasil.dihapus).toBe(1);
+    expect(prisma.dokumen.deleteMany).toHaveBeenCalledWith({ where: { id: { in: [6] } } });
+  });
+});
+
+describe("ubahNamaDokumen — dokumen bertaut", () => {
+  it("menolak rename karena berkasnya bukan milik bot", async () => {
+    prisma.dokumen.findUnique.mockResolvedValue({
+      id: 5, sumber: "TAUTAN", namaFile: "akad.pdf", remotePath: "/di/luar/akad.pdf",
+    });
+
+    await expect(ubahNamaDokumen(5, "Baru")).rejects.toThrow(DokumenTautanError);
+    expect(nextcloud.pindahBerkas).not.toHaveBeenCalled();
+  });
+});
+
+describe("daftarkanDokumenDariTautan", () => {
+  const muamalah = { id: 12, jenis: "QARDH", judul: "Pinjaman Fulan" };
+  // Sengaja di luar folder transaksi: dokumen bertaut boleh tinggal di mana saja.
+  const berkas = {
+    path: `${BASE}/Qardh/arsip-lama/Akad 001.pdf`,
+    nama: "Akad 001.pdf",
+    ukuran: 4096,
+    mimeType: "application/pdf",
+    diubahPada: null,
+  };
+
+  it("mencatat penunjuk tanpa mengunggah, memindah, atau menghapus apa pun", async () => {
+    nextcloud.resolveTautanNextcloud.mockResolvedValue(berkas);
+    prisma.dokumen.findUnique.mockResolvedValue(null);
+    prisma.dokumen.create.mockImplementation(async ({ data }: any) => ({ id: 9, ...data }));
+
+    const hasil = await daftarkanDokumenDariTautan({
+      muamalah,
+      tautan: "https://nc.example.com/f/501",
+      jenis: "AKAD",
+      diunggahOlehId: 1,
+    });
+
+    expect(nextcloud.unggahBerkas).not.toHaveBeenCalled();
+    expect(nextcloud.pindahBerkas).not.toHaveBeenCalled();
+    expect(nextcloud.hapusBerkas).not.toHaveBeenCalled();
+    expect(hasil).toMatchObject({
+      remotePath: berkas.path,
+      namaFile: "Akad 001.pdf",
+      ukuran: 4096,
+      sumber: "TAUTAN",
+      shareUrl: "https://nc.example.com/s/tok123",
+    });
+  });
+
+  it("menolak berkas yang sudah jadi dokumen transaksi lain", async () => {
+    nextcloud.resolveTautanNextcloud.mockResolvedValue(berkas);
+    prisma.dokumen.findUnique.mockResolvedValue({ id: 3, muamalahId: 7 });
+
+    await expect(
+      daftarkanDokumenDariTautan({ muamalah, tautan: "/x", jenis: "AKAD", diunggahOlehId: 1 })
+    ).rejects.toThrow(DokumenGandaError);
+    expect(prisma.dokumen.create).not.toHaveBeenCalled();
+  });
+});
+
+describe("hapusDokumen — bergantung asal berkas", () => {
+  it("ikut membuang berkas untuk dokumen yang diunggah bot", async () => {
+    prisma.dokumen.findUnique.mockResolvedValue({
+      id: 1, sumber: "UNGGAH", remotePath: "/a/b.pdf", shareToken: "tok",
+    });
+    prisma.dokumen.delete.mockResolvedValue({ id: 1 });
+    nextcloud.tautanPublik.mockResolvedValue({ shareId: "9", token: "tok", url: "u" });
+
+    await hapusDokumen(1);
+
+    expect(nextcloud.hapusBerkas).toHaveBeenCalledWith("/a/b.pdf");
+  });
+
+  it("hanya melepas baris untuk dokumen bertaut — berkas orang lain tidak disentuh", async () => {
+    prisma.dokumen.findUnique.mockResolvedValue({
+      id: 2, sumber: "TAUTAN", remotePath: "/a/b.pdf", shareToken: "tok",
+    });
+    prisma.dokumen.delete.mockResolvedValue({ id: 2 });
+
+    await hapusDokumen(2);
+
+    expect(nextcloud.hapusBerkas).not.toHaveBeenCalled();
+    expect(nextcloud.hapusTautan).not.toHaveBeenCalled();
+    expect(prisma.dokumen.delete).toHaveBeenCalledWith({ where: { id: 2 } });
   });
 });
 

@@ -111,6 +111,51 @@ export async function simpanDokumen(opts: {
       shareToken: tautan.token,
       shareUrl: tautan.url,
       jenis: opts.jenis,
+      sumber: "UNGGAH",
+      diunggahOlehId: opts.diunggahOlehId,
+    },
+  });
+}
+
+export class DokumenGandaError extends Error {
+  constructor(readonly muamalahIdLain: number) {
+    super(`Berkas itu sudah terdaftar sebagai dokumen transaksi #${muamalahIdLain}.`);
+    this.name = "DokumenGandaError";
+  }
+}
+
+/**
+ * Mendaftarkan berkas Nextcloud yang **sudah ada** sebagai dokumen sebuah akad,
+ * dari tautannya — pasangan dari simpanDokumen() untuk berkas yang tidak lewat
+ * Telegram. Berkasnya tidak disalin maupun dipindah; bot hanya menunjuk ke sana,
+ * jadi dokumen boleh tinggal di folder mana pun, termasuk folder yang sudah
+ * dikelola manual di Nextcloud.
+ */
+export async function daftarkanDokumenDariTautan(opts: {
+  muamalah: { id: number; jenis: string; judul: string };
+  tautan: string;
+  jenis: JenisDokumen;
+  diunggahOlehId: number;
+}) {
+  const berkas = await resolveTautanNextcloud(opts.tautan);
+
+  // remotePath unik di skema; tanpa cek ini, menautkan berkas yang sama ke
+  // transaksi kedua gagal sebagai error constraint yang tak terbaca operator.
+  const sudahAda = await prisma.dokumen.findUnique({ where: { remotePath: berkas.path } });
+  if (sudahAda) throw new DokumenGandaError(sudahAda.muamalahId);
+
+  const tautan = await tautanPublik(berkas.path);
+  return prisma.dokumen.create({
+    data: {
+      muamalahId: opts.muamalah.id,
+      namaFile: berkas.nama,
+      mimeType: berkas.mimeType,
+      ukuran: berkas.ukuran,
+      remotePath: berkas.path,
+      shareToken: tautan.token,
+      shareUrl: tautan.url,
+      jenis: opts.jenis,
+      sumber: "TAUTAN",
       diunggahOlehId: opts.diunggahOlehId,
     },
   });
@@ -137,9 +182,21 @@ export async function tautanDokumen(id: number): Promise<string | null> {
   return tautan.url;
 }
 
+/** Dokumen yang cuma ditunjuk tidak boleh diubah — berkasnya milik orang lain. */
+export class DokumenTautanError extends Error {
+  constructor() {
+    super(
+      "Dokumen ini didaftarkan dari tautan, jadi berkasnya bukan milik bot. " +
+        "Ubah namanya langsung di Nextcloud, lalu jalankan 🔄 Sinkron."
+    );
+    this.name = "DokumenTautanError";
+  }
+}
+
 export async function ubahNamaDokumen(id: number, namaBaru: string) {
   const dok = await prisma.dokumen.findUnique({ where: { id } });
   if (!dok) return null;
+  if (dok.sumber === "TAUTAN") throw new DokumenTautanError();
 
   const folder = dok.remotePath.slice(0, dok.remotePath.lastIndexOf("/"));
   // Ekstensi lama dipertahankan kalau operator lupa mengetiknya, supaya berkas
@@ -168,17 +225,23 @@ export async function ubahNamaDokumen(id: number, namaBaru: string) {
   });
 }
 
+/**
+ * Menghapus dokumen. Seberapa jauh penghapusannya tergantung asal berkas:
+ * yang diunggah bot ikut dibuang dari Nextcloud, sedangkan yang cuma ditunjuk
+ * lewat tautan hanya dilepas dari daftar — bot bukan pemiliknya, dan berkas itu
+ * bisa saja masih dipakai di luar bot.
+ */
 export async function hapusDokumen(id: number) {
   const dok = await prisma.dokumen.findUnique({ where: { id } });
   if (!dok) return null;
 
-  // Share dicabut lebih dulu supaya link yang sudah beredar di chat langsung
-  // mati, lalu berkasnya dihapus. Kegagalan mencabut share tidak boleh
-  // menggagalkan penghapusan berkas — menghapus berkas juga mematikan share-nya.
-  if (dok.shareToken) {
-    await cabutShare(dok.remotePath).catch(() => {});
+  if (dok.sumber === "UNGGAH") {
+    // Share dicabut lebih dulu supaya link yang sudah beredar di chat langsung
+    // mati, lalu berkasnya dihapus. Kegagalan mencabut share tidak boleh
+    // menggagalkan penghapusan berkas — menghapus berkas juga mematikan share-nya.
+    if (dok.shareToken) await cabutShare(dok.remotePath).catch(() => {});
+    await hapusBerkas(dok.remotePath);
   }
-  await hapusBerkas(dok.remotePath);
   return prisma.dokumen.delete({ where: { id } });
 }
 
@@ -201,7 +264,7 @@ async function cabutShare(remotePath: string): Promise<void> {
 export async function sinkronDokumen(
   muamalah: { id: number; jenis: string; judul: string },
   diunggahOlehId: number
-): Promise<{ ditambah: number; dihapus: number }> {
+): Promise<{ ditambah: number; dihapus: number; disegarkan: number }> {
   const folder = folderMuamalah(muamalah);
   const [berkas, tercatat] = await Promise.all([
     daftarBerkas(folder),
@@ -224,17 +287,43 @@ export async function sinkronDokumen(
         shareToken: tautan?.token ?? null,
         shareUrl: tautan?.url ?? null,
         jenis: "AKAD",
+        // Berkas ini memang ada di folder transaksi milik bot, jadi diperlakukan
+        // sama seperti unggahan: boleh di-rename dan dihapus lewat bot.
+        sumber: "UNGGAH",
         diunggahOlehId,
       },
     });
   }
 
-  const hilang = tercatat.filter((d) => !pathRemote.has(d.remotePath));
+  // Dokumen bertaut tinggal di luar folder transaksi, jadi ketidakhadirannya di
+  // daftar folder bukan bukti berkasnya hilang — masing-masing diperiksa sendiri.
+  // Tanpa pemisahan ini, sinkron akan melepas semua dokumen bertaut.
+  const hilang: number[] = [];
+  let disegarkan = 0;
+  for (const d of tercatat) {
+    const didalamFolder = d.remotePath.startsWith(`${folder}/`);
+    if (didalamFolder) {
+      if (!pathRemote.has(d.remotePath)) hilang.push(d.id);
+      continue;
+    }
+    const info = await infoBerkas(d.remotePath);
+    if (!info) {
+      hilang.push(d.id);
+      continue;
+    }
+    if (info.nama !== d.namaFile || info.ukuran !== d.ukuran || info.mimeType !== d.mimeType) {
+      await prisma.dokumen.update({
+        where: { id: d.id },
+        data: { namaFile: info.nama, ukuran: info.ukuran, mimeType: info.mimeType },
+      });
+      disegarkan++;
+    }
+  }
   if (hilang.length > 0) {
-    await prisma.dokumen.deleteMany({ where: { id: { in: hilang.map((d) => d.id) } } });
+    await prisma.dokumen.deleteMany({ where: { id: { in: hilang } } });
   }
 
-  return { ditambah: baru.length, dihapus: hilang.length };
+  return { ditambah: baru.length, dihapus: hilang.length, disegarkan };
 }
 
 // --- Template akad ---------------------------------------------------------

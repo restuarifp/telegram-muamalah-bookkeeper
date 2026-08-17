@@ -265,9 +265,16 @@ async function tampilkanDaftarDokumen(ctx: BotContext, muamalahId: number) {
   const dokumen = m.dokumen;
 
   const kb = new InlineKeyboard();
-  for (const d of dokumen) kb.text(`📄 ${d.namaFile}`, `dokumen:akad:detail:${d.id}`).row();
+  // 🔗 menandai dokumen yang cuma ditunjuk, supaya jelas mana yang berkasnya
+  // dipegang bot dan mana yang milik folder Nextcloud di luar sana.
+  for (const d of dokumen) {
+    const tanda = d.sumber === "TAUTAN" ? "🔗" : "📄";
+    kb.text(`${tanda} ${d.namaFile}`, `dokumen:akad:detail:${d.id}`).row();
+  }
   if (butuhOperator(ctx)) {
     kb.text("⬆️ Unggah", `muamalah:upload:${muamalahId}`)
+      .text("🔗 Dari Tautan", `dokumen:akad:tautkan:${muamalahId}`)
+      .row()
       .text("🔄 Sinkron", `dokumen:akad:sinkron:${muamalahId}`)
       .row();
   }
@@ -276,7 +283,7 @@ async function tampilkanDaftarDokumen(ctx: BotContext, muamalahId: number) {
   const teks =
     dokumen.length === 0
       ? `📎 Belum ada dokumen untuk transaksi #${muamalahId} — ${m.judul}.\n` +
-        `Unggah lewat tombol di bawah; berkasnya disimpan di Nextcloud.`
+        `Kirim berkasnya lewat ⬆️ Unggah, atau tunjuk berkas yang sudah ada di Nextcloud lewat 🔗 Dari Tautan.`
       : `📎 Dokumen transaksi #${muamalahId} — ${m.judul} (${dokumen.length}):\n` +
         `Ketuk salah satu untuk membuka.`;
   await ctx.reply(teks, { reply_markup: kb });
@@ -292,20 +299,25 @@ async function tampilkanDetailDokumen(ctx: BotContext, id: number) {
   if (!hasil.ok) return;
   const shareUrl = hasil.nilai;
 
+  const bertaut = d.sumber === "TAUTAN";
   const baris = [
-    `📄 <b>${escapeHtml(d.namaFile)}</b>`,
+    `${bertaut ? "🔗" : "📄"} <b>${escapeHtml(d.namaFile)}</b>`,
     `Transaksi: #${d.muamalahId}`,
     `Jenis: ${escapeHtml(d.jenis)} · ${formatUkuran(d.ukuran)}`,
-    `Diunggah: ${formatTanggal(d.createdAt)}`,
+    `Dicatat: ${formatTanggal(d.createdAt)}`,
+    bertaut
+      ? `Asal: ditautkan dari Nextcloud (berkas dikelola di sana)`
+      : `Asal: diunggah lewat bot`,
   ];
   if (shareUrl) baris.push("", tautanTersamar(`👉 Buka ${d.namaFile}`, shareUrl));
 
   const kb = new InlineKeyboard();
   if (shareUrl) tombolBerkas(kb, shareUrl);
   if (butuhOperator(ctx)) {
-    kb.text("✏️ Ubah Nama", `dokumen:akad:nama:${d.id}`)
-      .text("🗑️ Hapus", `dokumen:akad:hapus:${d.id}`)
-      .row();
+    // Ubah Nama me-rename berkas aslinya, jadi hanya ditawarkan untuk berkas
+    // yang memang ditaruh bot.
+    if (!bertaut) kb.text("✏️ Ubah Nama", `dokumen:akad:nama:${d.id}`);
+    kb.text(bertaut ? "🗑️ Lepas" : "🗑️ Hapus", `dokumen:akad:hapus:${d.id}`).row();
   }
   kb.text("⬅️ Daftar Dokumen", `dokumen:akad:list:${d.muamalahId}`).text("🏠 Menu", "menu:utama");
 
@@ -320,6 +332,15 @@ dokumenComposer.callbackQuery(/^dokumen:akad:list:(\d+)$/, async (ctx) => {
 dokumenComposer.callbackQuery(/^dokumen:akad:detail:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   await tampilkanDetailDokumen(ctx, Number(ctx.match![1]));
+});
+
+dokumenComposer.callbackQuery(/^dokumen:akad:tautkan:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  if (!butuhOperator(ctx)) {
+    await ctx.reply("⛔ Anda belum terdaftar sebagai operator.");
+    return;
+  }
+  await ctx.conversation.enter("tautkanDokumen", Number(ctx.match![1]));
 });
 
 dokumenComposer.callbackQuery(/^dokumen:akad:nama:(\d+)$/, async (ctx) => {
@@ -342,12 +363,15 @@ dokumenComposer.callbackQuery(/^dokumen:akad:hapus:(\d+)$/, async (ctx) => {
     await ctx.reply("Dokumen tidak ditemukan.");
     return;
   }
+  const bertaut = d.sumber === "TAUTAN";
   const kb = new InlineKeyboard()
-    .text("✅ Ya, hapus", `dokumen:akad:hapus_ya:${d.id}`)
+    .text(bertaut ? "✅ Ya, lepas" : "✅ Ya, hapus", `dokumen:akad:hapus_ya:${d.id}`)
     .text("❌ Batal", `dokumen:akad:detail:${d.id}`);
   await ctx.reply(
-    `Hapus dokumen <b>${escapeHtml(d.namaFile)}</b> dari transaksi #${d.muamalahId}?\n` +
-      `Berkasnya ikut dihapus dari Nextcloud dan link yang sudah dibagikan akan mati.`,
+    `${bertaut ? "Lepas" : "Hapus"} dokumen <b>${escapeHtml(d.namaFile)}</b> dari transaksi #${d.muamalahId}?\n` +
+      (bertaut
+        ? `Berkasnya tetap ada di Nextcloud — bot cuma berhenti menautkannya.`
+        : `Berkasnya ikut dihapus dari Nextcloud dan link yang sudah dibagikan akan mati.`),
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -367,12 +391,17 @@ dokumenComposer.callbackQuery(/^dokumen:akad:hapus_ya:(\d+)$/, async (ctx) => {
     muamalahId: d.muamalahId,
     remotePath: d.remotePath,
   });
-  await ctx.reply(`🗑️ Dokumen "${d.namaFile}" dihapus beserta berkasnya di Nextcloud.`, {
-    reply_markup: new InlineKeyboard().text(
-      "⬅️ Daftar Dokumen",
-      `dokumen:akad:list:${d.muamalahId}`
-    ),
-  });
+  await ctx.reply(
+    d.sumber === "TAUTAN"
+      ? `🗑️ Dokumen "${d.namaFile}" dilepas dari transaksi. Berkasnya masih utuh di Nextcloud.`
+      : `🗑️ Dokumen "${d.namaFile}" dihapus beserta berkasnya di Nextcloud.`,
+    {
+      reply_markup: new InlineKeyboard().text(
+        "⬅️ Daftar Dokumen",
+        `dokumen:akad:list:${d.muamalahId}`
+      ),
+    }
+  );
 });
 
 dokumenComposer.callbackQuery(/^dokumen:akad:sinkron:(\d+)$/, async (ctx) => {
@@ -395,9 +424,10 @@ dokumenComposer.callbackQuery(/^dokumen:akad:sinkron:(\d+)$/, async (ctx) => {
 
   await catatAudit(ctx, "SYNC", "Dokumen", muamalahId, hasil);
   const ringkas =
-    hasil.ditambah === 0 && hasil.dihapus === 0
+    hasil.ditambah === 0 && hasil.dihapus === 0 && hasil.disegarkan === 0
       ? "Tidak ada perubahan — daftar dokumen sudah sesuai Nextcloud."
-      : `➕ ${hasil.ditambah} didaftarkan, ➖ ${hasil.dihapus} dilepas (berkas hilang).`;
+      : `➕ ${hasil.ditambah} didaftarkan, ➖ ${hasil.dihapus} dilepas (berkas hilang), ` +
+        `🔁 ${hasil.disegarkan} disegarkan.`;
   await ctx.reply(`🔄 Sinkron dokumen #${muamalahId} selesai.\n${ringkas}`, {
     reply_markup: new InlineKeyboard().text(
       "⬅️ Daftar Dokumen",

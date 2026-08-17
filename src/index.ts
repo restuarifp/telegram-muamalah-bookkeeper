@@ -17,6 +17,7 @@ import { tambahMuamalah } from "./conversations/tambahMuamalah.js";
 import { editMuamalahConvo } from "./conversations/editMuamalah.js";
 import { catatAngsuranConvo } from "./conversations/catatAngsuran.js";
 import { uploadDokumenConvo } from "./conversations/uploadDokumen.js";
+import { tautkanDokumenConvo } from "./conversations/tautkanDokumen.js";
 import { tambahTemplateConvo } from "./conversations/tambahTemplate.js";
 import {
   ubahJudulTemplateConvo,
@@ -98,6 +99,7 @@ async function main() {
   bot.use(createConversation(editMuamalahConvo, "editMuamalah"));
   bot.use(createConversation(catatAngsuranConvo, "catatAngsuran"));
   bot.use(createConversation(uploadDokumenConvo, "uploadDokumen"));
+  bot.use(createConversation(tautkanDokumenConvo, "tautkanDokumen"));
   bot.use(createConversation(tambahTemplateConvo, "tambahTemplate"));
   bot.use(createConversation(ubahNamaDokumenConvo, "ubahNamaDokumen"));
   bot.use(createConversation(ubahJudulTemplateConvo, "ubahJudulTemplate"));

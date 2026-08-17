@@ -1,6 +1,7 @@
 import { InlineKeyboard } from "grammy";
 import type { BotContext, Convo } from "../bot-context.js";
 import {
+  DokumenTautanError,
   ambilDokumen,
   ambilTemplate,
   ubahJudulTemplate,
@@ -50,6 +51,12 @@ export async function ubahNamaDokumenConvo(
   const dok = await conversation.external(() => ambilDokumen(dokumenId));
   if (!dok) {
     await ctx.reply("Dokumen tidak ditemukan (mungkin sudah dihapus).");
+    return;
+  }
+  // Dicegat sebelum bertanya, supaya operator tidak mengetik nama baru untuk
+  // sesuatu yang memang tidak boleh diubah bot.
+  if (dok.sumber === "TAUTAN") {
+    await ctx.reply(`⚠️ ${new DokumenTautanError().message}`, { reply_markup: menuUtama() });
     return;
   }
 

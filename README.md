@@ -38,18 +38,24 @@ Folder per transaksi diawali ID-nya, sehingga tetap bisa dicocokkan ke transaksi
 
 ### Operasi yang tersedia
 
-Dokumen akad dan template akad sengaja punya model kepemilikan yang berbeda:
+Yang menentukan sejauh mana bot boleh menyentuh sebuah berkas bukan jenisnya, melainkan **asalnya** — direkam di kolom `Dokumen.sumber`:
 
-- **Dokumen akad — bot yang menaruh.** Operator mengirim berkasnya lewat Telegram, bot mengunggahnya ke folder transaksi. Karena bot yang membuat berkas itu, bot juga boleh mengganti nama dan menghapusnya.
-- **Template akad — bot cuma menunjuk.** Berkasnya sudah ada di Nextcloud; admin mendaftarkannya dengan **mengirim tautan**. Bot tidak pernah menyalin, memindah, atau menghapus berkas template.
+- **`UNGGAH` — bot yang menaruh.** Operator mengirim berkasnya lewat Telegram, bot mengunggahnya ke folder transaksi. Karena bot yang membuat berkas itu, bot juga boleh mengganti namanya dan menghapusnya.
+- **`TAUTAN` — bot cuma menunjuk.** Berkasnya sudah ada di Nextcloud dan didaftarkan lewat **tautan**. Bot tidak pernah menyalin, memindah, mengganti nama, atau menghapusnya; yang bisa dilakukan hanya melepasnya dari daftar.
+
+Template akad selalu bersifat menunjuk — tidak ada jalur unggah untuk template.
+
+Di chat, dokumen bertaut ditandai 🔗 dan dokumen unggahan ditandai 📄, jadi terlihat mana yang berkasnya dipegang bot.
 
 | Aksi | Dokumen per akad | Template akad |
 | --- | --- | --- |
-| Tambah | detail transaksi → **⬆️ Unggah** (kirim berkas) | `/template_tambah` → **kirim tautan Nextcloud** (admin) |
+| Tambah | **⬆️ Unggah** (kirim berkas) atau **🔗 Dari Tautan** | `/template_tambah` → **kirim tautan** (admin) |
 | Lihat | detail transaksi → **📎 Dokumen** | `/template` |
-| Ubah | **✏️ Ubah Nama** (WebDAV `MOVE`) | **✏️ Ubah Judul**, **🔗 Ganti Tautan** (admin) |
-| Hapus | **🗑️ Hapus** — berkas ikut dibuang | **🗑️ Lepas dari daftar** — berkas tetap utuh (admin) |
+| Ubah | **✏️ Ubah Nama** (WebDAV `MOVE`) — hanya untuk `UNGGAH` | **✏️ Ubah Judul**, **🔗 Ganti Tautan** (admin) |
+| Hapus | **🗑️ Hapus** (`UNGGAH`, berkas ikut dibuang) / **🗑️ Lepas** (`TAUTAN`, berkas utuh) | **🗑️ Lepas dari daftar** — berkas tetap utuh (admin) |
 | Selaraskan | **🔄 Sinkron** per transaksi | `/template_sinkron` (admin) |
+
+Satu berkas hanya boleh ditautkan ke satu transaksi; percobaan menautkannya lagi ditolak dengan menyebut transaksi yang sudah memakainya.
 
 ### Mendaftarkan template lewat tautan
 
@@ -69,7 +75,9 @@ Karena yang dicatat adalah penunjuk, **template boleh tinggal di folder mana pun
 
 **Sinkron template** bersifat *perbaikan*, bukan penemuan: tiap template terdaftar diperiksa ke Nextcloud, metadatanya (nama berkas, ukuran, tipe) disegarkan kalau berubah, dan baris yang berkasnya sudah tidak ada dilepas. Berkas folder template yang belum terdaftar hanya **dilaporkan**, tidak didaftarkan otomatis — kalau sinkron ikut memungut isi folder, template yang baru saja dilepas admin akan muncul lagi dan pelepasan jadi terasa tidak berefek.
 
-**Sinkron dokumen** (per transaksi) tetap dua arah: berkas yang ditaruh langsung lewat web Nextcloud didaftarkan, dan baris yang berkasnya hilang dilepas — di sana folder transaksi memang milik bot.
+**Sinkron dokumen** (per transaksi) tetap dua arah untuk isi folder transaksi: berkas yang ditaruh langsung lewat web Nextcloud didaftarkan (sebagai `UNGGAH`, karena folder itu memang milik bot), dan baris yang berkasnya hilang dilepas.
+
+Dokumen bertaut diperlakukan berbeda di sinkron: berkasnya tinggal **di luar** folder transaksi, jadi ketidakhadirannya dalam daftar folder bukan bukti ia hilang. Masing-masing diperiksa satu per satu — metadatanya disegarkan kalau berubah, dan baru dilepas kalau berkasnya benar-benar sudah tidak ada. Tanpa pemisahan ini, satu tekan 🔄 Sinkron akan melenyapkan semua dokumen bertaut.
 
 ### Kredensial
 
@@ -103,13 +111,20 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
-Volume `muamalah-data` kini hanya menyimpan database SQLite (dan penanda healthcheck) — berkas dokumen ada di Nextcloud, jadi backup volume ini tidak lagi mencakup dokumen akad.
+Volume datanya kini hanya menyimpan database SQLite (dan penanda healthcheck) — berkas dokumen ada di Nextcloud, jadi backup volume ini tidak lagi mencakup dokumen akad.
 
 Backup:
 
 ```bash
-docker run --rm -v muamalah-data:/data -v $PWD:/backup alpine tar czf /backup/backup.tar.gz /data
+# Compose memberi awalan nama proyek pada volume, jadi nama sebenarnya adalah
+# <nama-folder-proyek>_muamalah-data — bukan "muamalah-data" saja. Pastikan dulu:
+docker volume ls | grep muamalah-data
+
+docker run --rm -v muamalah-database_muamalah-data:/data -v "$PWD":/backup \
+  alpine tar czf /backup/backup.tar.gz /data
 ```
+
+> Salah menyebut nama volume di sini tidak menghasilkan error: Docker justru membuat volume kosong baru dan menghasilkan arsip kosong. Cek isi arsipnya (`tar tzf backup.tar.gz`) setelah backup pertama.
 
 ## Uji coba tanpa menunggu cron
 

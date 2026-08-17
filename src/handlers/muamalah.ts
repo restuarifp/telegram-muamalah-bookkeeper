@@ -83,6 +83,7 @@ function kartuDetail(m: NonNullable<Awaited<ReturnType<typeof detailMuamalah>>>)
   }
   kb.text(`📎 Dokumen (${m.dokumen.length})`, `dokumen:akad:list:${m.id}`)
     .text("⬆️ Unggah", `muamalah:upload:${m.id}`)
+    .text("🔗 Dari Tautan", `dokumen:akad:tautkan:${m.id}`)
     .row();
   kb.text("✏️ Edit", `muamalah:edit:${m.id}`).text("🗑️ Hapus", `muamalah:hapus:${m.id}`).row();
   kb.text("🏠 Menu", "menu:utama");
@@ -105,11 +106,16 @@ async function tampilkanDetail(ctx: BotContext, id: number) {
   // di bawah sudah berupa HTML (link tersamar) dan tidak boleh ikut di-escape.
   const kepala = escapeHtml(teks + daftarAngsuran);
   const daftarDok = m.dokumen.length
-    ? "\n\nDokumen (tersimpan di Nextcloud):\n" +
+    ? "\n\nDokumen (di Nextcloud):\n" +
       m.dokumen
-        .map((d) =>
-          d.shareUrl ? `• ${tautanTersamar(d.namaFile, d.shareUrl)}` : `• ${escapeHtml(d.namaFile)}`
-        )
+        .map((d) => {
+          // 🔗 = ditautkan ke berkas yang dikelola di Nextcloud, 📄 = diunggah lewat bot.
+          const tanda = d.sumber === "TAUTAN" ? "🔗" : "📄";
+          const label = `${tanda} ${d.namaFile}`;
+          return d.shareUrl
+            ? `• ${tautanTersamar(label, d.shareUrl)}`
+            : `• ${escapeHtml(label)}`;
+        })
         .join("\n")
     : "\n\nBelum ada dokumen akad.";
 
