@@ -7,7 +7,11 @@ Sistem manajemen dan pencatatan muamalah non-tunai (utang-piutang, investasi, qa
 - **CRUD & daftar muamalah** — wizard inline keyboard (`/tambah`, `/list`, `/filter`), edit field, catat angsuran, tandai selesai, hapus (soft delete; hard delete khusus admin lewat `/hapus_permanen`).
 - **Status transaksi** — `DRAFT` → `BERJALAN` → `SELESAI`, atau `BATAL`. Transaksi bisa disimpan sebagai draft dari langkah konfirmasi wizard; draft tidak dihitung di rekap dan tidak memicu pengingat sampai diaktifkan lewat tombol "Jadikan Berjalan". **Keterlambatan bukan status**: dihitung saat ditampilkan dari `jatuhTempo` pada transaksi `BERJALAN`, sehingga mengubah jatuh tempo langsung tercermin tanpa job pembetulan.
 - **Skema cicilan** — untuk utang/piutang/qardh, disimpan parametrik (jumlah cicilan, periode bulanan/mingguan, tanggal cicilan pertama). Jadwal, nominal per cicilan, dan cicilan berikutnya dihitung dari ketiga kolom itu di `src/utils/cicilan.ts` — sisa pembagian ditumpuk ke cicilan terakhir agar totalnya persis sama dengan pokok.
-- **Notifikasi jatuh tempo** — pengingat otomatis harian jam 08:00 WIB (H-7, H-3, H-1, H-0, dan terlambat mingguan) dikirim ke grup (atau ke chat pribadi admin bila `GROUP_ID` kosong); `/jatuhtempo` untuk cek manual kapan saja.
+- **Notifikasi jatuh tempo** — pengingat otomatis harian jam 08:00 WIB (H-7, H-3, H-1, H-0, dan terlambat mingguan) dikirim ke grup (atau ke chat pribadi admin bila `GROUP_ID` kosong); `/jatuhtempo` untuk cek manual kapan saja. Transaksi bercicilan diingatkan **per cicilan**, bukan per transaksi:
+  - Cicilan yang sudah tertutup pembayaran berhenti diingatkan dengan sendirinya — tidak ada penandaan manual.
+  - Tunggakan digabung jadi satu pesan per transaksi ("3 cicilan tertunggak (ke-1 s/d ke-3) — total Rp …"), supaya enam cicilan telat tidak jadi enam pesan.
+  - `jatuhTempo` transaksi tidak ikut memicu pengingat kalau ada skema cicilan, agar tidak dobel dengan cicilan terakhir.
+  - Dedup memakai kunci `(muamalahId, urutanCicilan, offsetHari)`; tunggakan ditagih ulang tiap kelipatan 7 hari.
 - **Manajemen dokumen akad** — upload/download dokumen per transaksi, plus template akad siap unduh (`/template`, `/template_tambah` untuk admin).
 - **Rekap** (`/rekap`) dan **manajemen operator** (`/operator_list`, `/operator_tambah`, `/operator_hapus`, admin-only) dengan audit log di setiap mutasi.
 

@@ -128,8 +128,12 @@ model Pengingat {
   id           Int       @id @default(autoincrement())
   muamalahId   Int
   muamalah     Muamalah  @relation(fields: [muamalahId], references: [id])
+  // Nomor cicilan yang diingatkan; 0 berarti pengingat tingkat transaksi
+  // (dipakai untuk transaksi tanpa skema cicilan). Tanpa kolom ini, pengingat
+  // cicilan ke-2 akan dianggap duplikat cicilan ke-1 karena offsetHari-nya sama.
+  urutanCicilan Int      @default(0)
   offsetHari   Int
   terkirimPada DateTime?
 
-  @@unique([muamalahId, offsetHari])
+  @@unique([muamalahId, urutanCicilan, offsetHari])
 }
