@@ -7,6 +7,23 @@ export type Role = (typeof ROLES)[number];
 export const JENIS_MUAMALAH = ["UTANG", "PIUTANG", "INVESTASI", "QARDH", "LAINNYA"] as const;
 export type JenisMuamalah = (typeof JENIS_MUAMALAH)[number];
 
+/**
+ * Jenis yang boleh dipilih operator saat mencatat transaksi baru.
+ *
+ * Sengaja dipisah dari JENIS_MUAMALAH, bukan memangkasnya: daftar di atas tetap
+ * berisi semua nilai yang *dikenali* sistem, supaya transaksi lama berjenis lain
+ * tetap tampil dengan label yang benar, ikut terhitung di rekap, dan tetap punya
+ * folder Nextcloud sendiri. Yang dibatasi hanya apa yang bisa dibuat baru.
+ *
+ * Untuk membuka jenis lain, cukup tambahkan di sini — tidak ada tempat lain yang
+ * perlu disentuh.
+ */
+export const JENIS_AKTIF = ["QARDH"] as const satisfies readonly JenisMuamalah[];
+
+export function isJenisAktif(v: string): v is JenisMuamalah {
+  return (JENIS_AKTIF as readonly string[]).includes(v);
+}
+
 // Catatan: "terlambat" bukan status, melainkan turunan dari jatuhTempo pada
 // transaksi BERJALAN — lihat sudahTerlambat() di src/utils/cicilan.ts.
 export const STATUS_MUAMALAH = ["DRAFT", "BERJALAN", "SELESAI", "BATAL"] as const;

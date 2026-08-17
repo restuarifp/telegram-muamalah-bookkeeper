@@ -9,7 +9,7 @@ import {
 import { ringkasanMuamalah, formatRupiah, LABEL_JENIS } from "../utils/format.js";
 import { OPSI_TAUTAN, escapeHtml, tautanTersamar } from "../utils/tautan.js";
 import { sudahTerlambat } from "../utils/cicilan.js";
-import { JENIS_MUAMALAH, isJenisMuamalah } from "../types.js";
+import { JENIS_AKTIF, isJenisMuamalah } from "../types.js";
 import { catatAudit } from "../middlewares/audit.js";
 import { menuUtama } from "./menu.js";
 
@@ -220,14 +220,18 @@ muamalahComposer.callbackQuery("noop", async (ctx) => ctx.answerCallbackQuery())
 
 muamalahComposer.command("filter", async (ctx) => {
   const kb = new InlineKeyboard();
-  for (const j of JENIS_MUAMALAH) kb.text(LABEL_JENIS[j], `filter:jenis:${j}`).row();
-  kb.text("🔄 Reset filter", "filter:reset");
+  // Hanya jenis yang dibuka yang ditawarkan; "Reset filter" tetap menampilkan
+  // semuanya, termasuk transaksi lama berjenis lain yang sudah tidak dibuat baru.
+  for (const j of JENIS_AKTIF) kb.text(LABEL_JENIS[j], `filter:jenis:${j}`).row();
+  kb.text("🔄 Reset filter (semua jenis)", "filter:reset");
   await ctx.reply("Filter berdasarkan jenis:", { reply_markup: kb });
 });
 
 muamalahComposer.callbackQuery(/^filter:jenis:(.+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   const jenis = ctx.match![1];
+  // Divalidasi terhadap daftar lengkap, bukan JENIS_AKTIF: tombol filter dari
+  // pesan lama harus tetap bekerja walau jenisnya sudah tidak ditawarkan lagi.
   if (isJenisMuamalah(jenis)) {
     ctx.session.listFilter = { ...ctx.session.listFilter, jenis };
   }

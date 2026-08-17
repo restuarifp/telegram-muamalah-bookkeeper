@@ -1,7 +1,7 @@
 import { InlineKeyboard } from "grammy";
 import type { BotContext, Convo } from "../bot-context.js";
 import {
-  JENIS_MUAMALAH,
+  JENIS_AKTIF,
   bolehBercicilan,
   isPeriodeCicilan,
   type JenisMuamalah,
@@ -67,15 +67,24 @@ export async function tambahMuamalah(conversation: Convo, ctx: BotContext) {
     return;
   }
 
-  // 1. Jenis
-  const jenisPilihan = await tanyaPilihan(
-    conversation,
-    ctx,
-    "Jenis muamalah apa yang ingin dicatat?",
-    JENIS_MUAMALAH.map((j) => ({ label: LABEL_JENIS[j], data: j }))
-  );
-  if (!jenisPilihan) return batal(ctx);
-  const jenis = jenisPilihan as JenisMuamalah;
+  // 1. Jenis. Kalau cuma satu jenis yang dibuka, langkah ini dilewati — menyodorkan
+  // pertanyaan yang jawabannya cuma satu hanya menambah satu ketukan tanpa pilihan.
+  let jenis: JenisMuamalah;
+  if (JENIS_AKTIF.length === 1) {
+    jenis = JENIS_AKTIF[0];
+    await ctx.reply(`Mencatat muamalah jenis *${LABEL_JENIS[jenis]}*.`, {
+      parse_mode: "Markdown",
+    });
+  } else {
+    const jenisPilihan = await tanyaPilihan(
+      conversation,
+      ctx,
+      "Jenis muamalah apa yang ingin dicatat?",
+      JENIS_AKTIF.map((j) => ({ label: LABEL_JENIS[j], data: j }))
+    );
+    if (!jenisPilihan) return batal(ctx);
+    jenis = jenisPilihan as JenisMuamalah;
+  }
 
   // 2. Pihak
   const namaPihak = await tanyaTeks(conversation, ctx, "Siapa nama pihak (mitra) transaksi ini?");
