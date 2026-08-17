@@ -17,7 +17,7 @@ export function menuUtama(): InlineKeyboard {
 }
 
 const TEKS_SAMBUTAN =
-  "🕌 *Bot Muamalah*\n\n" +
+  "*Bot Transaksi Muamalah*\n\n" +
   "Pencatatan utang-piutang, investasi, dan akad non-tunai lainnya.\n" +
   "Pilih menu di bawah, atau ketik perintah langsung (mis. /list, /rekap).";
 
@@ -51,8 +51,16 @@ menuComposer.callbackQuery("menu:dokumen", async (ctx) => {
   await ctx.answerCallbackQuery();
   await ctx.reply(
     "📎 Dokumen & Template\n\n" +
-      "/list — pilih transaksi lalu unggah/unduh dokumen akadnya\n" +
-      "/template — daftar template akad siap unduh"
+      "Semua berkas disimpan di Nextcloud; yang dibagikan di chat hanya tautannya.\n\n" +
+      "/list — pilih transaksi lalu kelola dokumen akadnya\n" +
+      "/template — daftar & kelola template akad",
+    {
+      reply_markup: new InlineKeyboard()
+        .text("📄 Template Akad", "dokumen:tpl:list")
+        .text("📋 Daftar Transaksi", "menu:list")
+        .row()
+        .text("🏠 Menu", "menu:utama"),
+    }
   );
 });
 

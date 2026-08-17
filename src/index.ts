@@ -18,7 +18,12 @@ import { editMuamalahConvo } from "./conversations/editMuamalah.js";
 import { catatAngsuranConvo } from "./conversations/catatAngsuran.js";
 import { uploadDokumenConvo } from "./conversations/uploadDokumen.js";
 import { tambahTemplateConvo } from "./conversations/tambahTemplate.js";
+import {
+  ubahJudulTemplateConvo,
+  ubahNamaDokumenConvo,
+} from "./conversations/ubahNamaDokumen.js";
 import { jadwalkanReminderHarian } from "./jobs/reminderJob.js";
+import { pastikanFolder } from "./services/nextcloud.js";
 
 async function seedAdminAwal() {
   for (const telegramUserId of config.adminIds) {
@@ -33,6 +38,30 @@ async function seedAdminAwal() {
   }
 }
 
+/**
+ * Memastikan folder penyimpanan di Nextcloud ada sejak awal, sekaligus jadi
+ * pemeriksaan kredensial saat start — lebih baik ketahuan di log waktu boot
+ * daripada baru muncul sebagai kegagalan saat operator mengunggah dokumen.
+ * Bot tetap jalan kalau Nextcloud sedang tak bisa dihubungi; fitur dokumennya
+ * yang akan mengeluh, bukan seluruh bot.
+ */
+async function siapkanFolderNextcloud() {
+  const { folderJenis, baseDir, templateDir } = config.nextcloud;
+  try {
+    await pastikanFolder(templateDir);
+    for (const nama of new Set(Object.values(folderJenis))) {
+      await pastikanFolder(`${baseDir}/${nama}`);
+    }
+    console.log(`[nextcloud] Folder penyimpanan siap di "${baseDir}".`);
+  } catch (err) {
+    console.error(
+      `[nextcloud] Gagal menyiapkan folder di ${config.nextcloud.baseUrl}:`,
+      err instanceof Error ? err.message : err
+    );
+    console.error("[nextcloud] Fitur dokumen & template akan gagal sampai ini beres.");
+  }
+}
+
 // Menulis penanda waktu berkala agar HEALTHCHECK docker-compose (find -mmin -5) bisa
 // mendeteksi proses masih hidup, tanpa perlu membuka port HTTP tambahan.
 function jadwalkanHealthcheck() {
@@ -43,8 +72,8 @@ function jadwalkanHealthcheck() {
 }
 
 async function main() {
-  await fs.mkdir(config.documentsDir, { recursive: true });
-  await fs.mkdir(config.templatesDir, { recursive: true });
+  await fs.mkdir(config.dataDir, { recursive: true });
+  await siapkanFolderNextcloud();
   await seedAdminAwal();
 
   const bot = new Bot<BotContext>(config.botToken);
@@ -70,6 +99,8 @@ async function main() {
   bot.use(createConversation(catatAngsuranConvo, "catatAngsuran"));
   bot.use(createConversation(uploadDokumenConvo, "uploadDokumen"));
   bot.use(createConversation(tambahTemplateConvo, "tambahTemplate"));
+  bot.use(createConversation(ubahNamaDokumenConvo, "ubahNamaDokumen"));
+  bot.use(createConversation(ubahJudulTemplateConvo, "ubahJudulTemplate"));
 
   bot.use(groupInfoComposer);
   bot.use(menuComposer);
@@ -88,8 +119,9 @@ async function main() {
     { command: "filter", description: "Filter daftar berdasarkan jenis" },
     { command: "rekap", description: "Rekap ringkasan muamalah aktif" },
     { command: "jatuhtempo", description: "Lihat transaksi yang jatuh tempo" },
-    { command: "template", description: "Unduh template akad" },
+    { command: "template", description: "Daftar & kelola template akad" },
     { command: "template_tambah", description: "Tambah template akad (admin)" },
+    { command: "template_sinkron", description: "Selaraskan template dari Nextcloud (admin)" },
     { command: "operator_list", description: "Lihat daftar operator" },
     { command: "operator_tambah", description: "Tambah operator (admin)" },
     { command: "operator_hapus", description: "Nonaktifkan operator (admin)" },

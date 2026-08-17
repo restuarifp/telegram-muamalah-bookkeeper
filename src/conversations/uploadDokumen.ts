@@ -1,18 +1,12 @@
 import { InlineKeyboard } from "grammy";
 import type { BotContext, Convo } from "../bot-context.js";
-import { config } from "../config.js";
 import { validasiDokumen, simpanDokumen } from "../services/dokumenService.js";
+import { detailMuamalah } from "../services/muamalahService.js";
+import { NextcloudError } from "../services/nextcloud.js";
 import { catatAudit } from "../middlewares/audit.js";
+import { berkasDariPesan, unduhFileTelegram } from "../utils/telegramFile.js";
+import { OPSI_TAUTAN, escapeHtml, tautanTersamar } from "../utils/tautan.js";
 import { menuUtama } from "../handlers/menu.js";
-
-async function unduhFileTelegram(ctx: BotContext, fileId: string): Promise<Buffer> {
-  const file = await ctx.api.getFile(fileId);
-  const url = `https://api.telegram.org/file/bot${config.botToken}/${file.file_path}`;
-  const res = await fetch(url);
-  if (!res.ok) throw new Error(`Gagal mengunduh file dari Telegram: ${res.status}`);
-  const arrayBuffer = await res.arrayBuffer();
-  return Buffer.from(arrayBuffer);
-}
 
 export async function uploadDokumenConvo(conversation: Convo, ctx: BotContext, muamalahId: number) {
   const operator = ctx.operator;
@@ -21,66 +15,78 @@ export async function uploadDokumenConvo(conversation: Convo, ctx: BotContext, m
     return;
   }
 
+  const muamalah = await conversation.external(() => detailMuamalah(muamalahId));
+  if (!muamalah) {
+    await ctx.reply("Transaksi tidak ditemukan (mungkin sudah dihapus).");
+    return;
+  }
+
   await ctx.reply(
-    `Kirim dokumen akad untuk transaksi #${muamalahId} (PDF, JPG, PNG, atau DOC/DOCX, maks 20 MB).`,
+    `Kirim dokumen akad untuk transaksi #${muamalahId} (PDF, JPG, PNG, atau DOC/DOCX, maks 20 MB).\n` +
+      `Berkas akan disimpan di Nextcloud, dan yang dibagikan di chat cuma tautannya.`,
     { reply_markup: new InlineKeyboard().text("❌ Batal", "wizard:batal") }
   );
 
   while (true) {
-    const next = await conversation.waitFor(["message:document", "message:photo", "callback_query:data"]);
+    const next = await conversation.waitFor([
+      "message:document",
+      "message:photo",
+      "callback_query:data",
+    ]);
     if (next.callbackQuery) {
       await next.answerCallbackQuery();
       await ctx.reply("Dibatalkan.", { reply_markup: menuUtama() });
       return;
     }
 
-    const doc = next.message?.document;
-    const photo = next.message?.photo?.at(-1); // resolusi tertinggi
+    const berkas = berkasDariPesan(next);
+    if (!berkas) continue;
 
-    let fileId: string;
-    let namaFile: string;
-    let mimeType: string;
-    let fileSize: number | undefined;
-
-    if (doc) {
-      fileId = doc.file_id;
-      namaFile = doc.file_name ?? `dokumen-${Date.now()}`;
-      mimeType = doc.mime_type ?? "application/octet-stream";
-      fileSize = doc.file_size;
-    } else if (photo) {
-      fileId = photo.file_id;
-      namaFile = `foto-${Date.now()}.jpg`;
-      mimeType = "image/jpeg";
-      fileSize = photo.file_size;
-    } else {
-      continue;
-    }
-
-    const error = validasiDokumen(mimeType, fileSize);
+    const error = validasiDokumen(berkas.mimeType, berkas.ukuran);
     if (error) {
       await ctx.reply(`⚠️ ${error} Kirim ulang dokumen yang sesuai, atau batalkan.`);
       continue;
     }
 
-    const isiFile = await conversation.external(() => unduhFileTelegram(ctx, fileId));
-    const dokumen = await conversation.external(() =>
-      simpanDokumen({
+    await ctx.reply("⏳ Mengunggah ke Nextcloud…");
+
+    let dokumen;
+    try {
+      const isiFile = await conversation.external(() => unduhFileTelegram(ctx, berkas.fileId));
+      dokumen = await conversation.external(() =>
+        simpanDokumen({
+          muamalah,
+          namaFile: berkas.namaFile,
+          mimeType: berkas.mimeType,
+          isiFile,
+          jenis: "AKAD",
+          diunggahOlehId: operator.id,
+        })
+      );
+    } catch (err) {
+      const pesan =
+        err instanceof NextcloudError
+          ? `Nextcloud menolak unggahan: ${err.message}`
+          : "Gagal mengunggah dokumen.";
+      await ctx.reply(`⚠️ ${pesan} Coba lagi, atau hubungi admin.`, { reply_markup: menuUtama() });
+      return;
+    }
+
+    await conversation.external(() =>
+      catatAudit(ctx, "CREATE", "Dokumen", dokumen!.id, {
         muamalahId,
-        namaFile,
-        mimeType,
-        telegramFileId: fileId,
-        isiFile,
-        jenis: "AKAD",
-        diunggahOlehId: operator.id,
+        namaFile: dokumen!.namaFile,
+        remotePath: dokumen!.remotePath,
       })
     );
-    await conversation.external(() =>
-      catatAudit(ctx, "CREATE", "Dokumen", dokumen.id, { muamalahId, namaFile })
-    );
 
-    await ctx.reply(`✅ Dokumen "${namaFile}" tersimpan untuk transaksi #${muamalahId}.`, {
-      reply_markup: menuUtama(),
-    });
+    const tautan = dokumen.shareUrl
+      ? `\n${tautanTersamar(`📄 Buka ${dokumen.namaFile}`, dokumen.shareUrl)}`
+      : "";
+    await ctx.reply(
+      `✅ Dokumen <b>${escapeHtml(dokumen.namaFile)}</b> tersimpan di Nextcloud untuk transaksi #${muamalahId}.${tautan}`,
+      { ...OPSI_TAUTAN, reply_markup: menuUtama() }
+    );
     return;
   }
 }

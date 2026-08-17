@@ -86,29 +86,44 @@ model Angsuran {
   @@index([muamalahId])
 }
 
+// Berkas fisik dokumen & template ada di Nextcloud, bukan di disk lokal maupun
+// di server Telegram. Yang disimpan di sini hanya penunjuknya: path WebDAV
+// (sumber kebenaran, dipakai untuk rename/hapus/ganti) plus cache link berbagi
+// publik supaya tidak perlu memanggil OCS Share API tiap kali dokumen dibuka.
+
 model Dokumen {
   id              Int          @id @default(autoincrement())
   muamalahId      Int
   muamalah        Muamalah     @relation(fields: [muamalahId], references: [id])
   namaFile        String
   mimeType        String
-  telegramFileId  String
-  pathLokal       String
+  ukuran          Int          @default(0)
+  // Path relatif terhadap folder milik NEXTCLOUD_USER, mis.
+  // "/Documents/Kumpulan Akad/Qardh/12-pinjaman-fulan/akad.pdf".
+  remotePath      String       @unique
+  shareToken      String?
+  shareUrl        String?
   jenis           String       @default("AKAD") // AKAD | BUKTI | LAINNYA
   diunggahOlehId  Int
   diunggahOleh    Operator     @relation("DiunggahOleh", fields: [diunggahOlehId], references: [id])
   createdAt       DateTime     @default(now())
+  updatedAt       DateTime     @updatedAt
 
   @@index([muamalahId])
 }
 
 model Template {
-  id             Int      @id @default(autoincrement())
-  kode           String   @unique
-  judul          String
-  telegramFileId String
-  pathLokal      String
-  createdAt      DateTime @default(now())
+  id         Int      @id @default(autoincrement())
+  kode       String   @unique
+  judul      String
+  namaFile   String
+  mimeType   String   @default("application/octet-stream")
+  ukuran     Int      @default(0)
+  remotePath String   @unique
+  shareToken String?
+  shareUrl   String?
+  createdAt  DateTime @default(now())
+  updatedAt  DateTime @updatedAt
 }
 
 model AuditLog {

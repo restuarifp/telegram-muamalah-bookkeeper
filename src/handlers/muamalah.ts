@@ -7,6 +7,7 @@ import {
   hapusMuamalah,
 } from "../services/muamalahService.js";
 import { ringkasanMuamalah, formatRupiah, LABEL_JENIS } from "../utils/format.js";
+import { OPSI_TAUTAN, escapeHtml, tautanTersamar } from "../utils/tautan.js";
 import { sudahTerlambat } from "../utils/cicilan.js";
 import { JENIS_MUAMALAH, isJenisMuamalah } from "../types.js";
 import { catatAudit } from "../middlewares/audit.js";
@@ -80,7 +81,9 @@ function kartuDetail(m: NonNullable<Awaited<ReturnType<typeof detailMuamalah>>>)
     kb.text("💰 Catat Angsuran", `muamalah:angsuran:${m.id}`).row();
     kb.text("✅ Tandai Selesai", `muamalah:selesai:${m.id}`).row();
   }
-  kb.text("📎 Upload Dokumen", `muamalah:upload:${m.id}`).row();
+  kb.text(`📎 Dokumen (${m.dokumen.length})`, `dokumen:akad:list:${m.id}`)
+    .text("⬆️ Unggah", `muamalah:upload:${m.id}`)
+    .row();
   kb.text("✏️ Edit", `muamalah:edit:${m.id}`).text("🗑️ Hapus", `muamalah:hapus:${m.id}`).row();
   kb.text("🏠 Menu", "menu:utama");
   return kb;
@@ -97,10 +100,20 @@ async function tampilkanDetail(ctx: BotContext, id: number) {
     ? "\n\nRiwayat angsuran:\n" +
       m.angsuran.map((a) => `• ${formatRupiah(a.jumlah)} (${a.tanggal.toISOString().slice(0, 10)})`).join("\n")
     : "";
+
+  // Bagian di atas ini teks biasa, jadi di-escape sekali di sini; baris dokumen
+  // di bawah sudah berupa HTML (link tersamar) dan tidak boleh ikut di-escape.
+  const kepala = escapeHtml(teks + daftarAngsuran);
   const daftarDok = m.dokumen.length
-    ? "\n\nDokumen:\n" + m.dokumen.map((d) => `• ${d.namaFile}`).join("\n")
+    ? "\n\nDokumen (tersimpan di Nextcloud):\n" +
+      m.dokumen
+        .map((d) =>
+          d.shareUrl ? `• ${tautanTersamar(d.namaFile, d.shareUrl)}` : `• ${escapeHtml(d.namaFile)}`
+        )
+        .join("\n")
     : "\n\nBelum ada dokumen akad.";
-  await ctx.reply(teks + daftarAngsuran + daftarDok, { reply_markup: kartuDetail(m) });
+
+  await ctx.reply(kepala + daftarDok, { ...OPSI_TAUTAN, reply_markup: kartuDetail(m) });
 }
 
 muamalahComposer.callbackQuery(/^muamalah:detail:(\d+)$/, async (ctx) => {

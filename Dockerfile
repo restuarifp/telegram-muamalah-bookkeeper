@@ -30,7 +30,9 @@ COPY --from=builder /app/node_modules/.prisma ./node_modules/.prisma
 COPY --from=builder /app/node_modules/@prisma ./node_modules/@prisma
 COPY --from=builder /app/dist ./dist
 
-RUN mkdir -p /app/data/documents /app/data/templates \
+# Volume /app/data kini hanya menampung database SQLite + penanda healthcheck;
+# dokumen akad dan template tinggal di Nextcloud.
+RUN mkdir -p /app/data \
   && addgroup -S app && adduser -S app -G app \
   && chown -R app:app /app
 USER app
