@@ -1,17 +1,30 @@
 import { InlineKeyboard } from "grammy";
 import type { BotContext, Convo } from "../bot-context.js";
-import { validasiDokumen, tambahTemplate, ambilTemplateByKode } from "../services/dokumenService.js";
-import { NextcloudError } from "../services/nextcloud.js";
+import {
+  TemplateGandaError,
+  ambilTemplateByKode,
+  daftarkanTemplateDariTautan,
+} from "../services/dokumenService.js";
+import { NextcloudError, TautanTidakValidError } from "../services/nextcloud.js";
 import { catatAudit } from "../middlewares/audit.js";
-import { berkasDariPesan, unduhFileTelegram } from "../utils/telegramFile.js";
-import { OPSI_TAUTAN, escapeHtml, tautanTersamar } from "../utils/tautan.js";
+import { OPSI_TAUTAN, escapeHtml, formatUkuran, tautanTersamar } from "../utils/tautan.js";
 import { menuUtama } from "../handlers/menu.js";
 
+const CONTOH_TAUTAN =
+  "Contoh bentuk yang diterima:\n" +
+  "• tautan berkas dari web Nextcloud (…/apps/files/files/123?dir=…)\n" +
+  "• permalink “Copy direct link” (…/f/123)\n" +
+  "• link berbagi (…/s/xxxxxxxx)\n" +
+  "• path langsung, mis. /Documents/Akad Muamalah/Template Akad/Qardh.docx";
+
 /**
- * Wizard tambah/ganti template akad. Dipakai dua arah:
- * - tanpa `kodeAwal`: membuat template baru (menanyakan kode & judul);
- * - dengan `kodeAwal`: mengganti berkas template yang sudah ada, langsung ke
- *   langkah unggah supaya admin tidak perlu mengetik ulang kode & judulnya.
+ * Wizard pendaftaran template akad. Template **tidak diunggah** lewat Telegram:
+ * berkasnya sudah ada di Nextcloud, dan yang dicatat bot hanya penunjuk ke sana.
+ *
+ * Dipakai dua arah:
+ * - tanpa `kodeAwal`: mendaftarkan template baru (menanyakan kode & judul);
+ * - dengan `kodeAwal`: mengarahkan kode yang sudah ada ke berkas lain, langsung
+ *   ke langkah tautan supaya admin tidak mengetik ulang kode & judulnya.
  */
 export async function tambahTemplateConvo(
   conversation: Convo,
@@ -36,8 +49,9 @@ export async function tambahTemplateConvo(
     }
     judul = lama.judul;
     await ctx.reply(
-      `Mengganti berkas template <b>${escapeHtml(lama.judul)}</b> (kode: ${escapeHtml(lama.kode)}).\n` +
-        `Kirim berkas penggantinya (PDF/DOC/DOCX). Berkas lama akan dihapus dari Nextcloud.`,
+      `Mengarahkan template <b>${escapeHtml(lama.judul)}</b> (kode: ${escapeHtml(lama.kode)}) ke berkas lain.\n` +
+        `Berkas lamanya dibiarkan apa adanya di Nextcloud.\n\n` +
+        `Kirim tautan Nextcloud berkas penggantinya.\n\n${CONTOH_TAUTAN}`,
       { parse_mode: "HTML", reply_markup: batalKb }
     );
   } else {
@@ -65,45 +79,43 @@ export async function tambahTemplateConvo(
       judul = next.message?.text?.trim() ?? null;
     }
 
-    await ctx.reply("Kirim file template-nya (PDF/DOC/DOCX):", { reply_markup: batalKb });
+    await ctx.reply(
+      `Kirim tautan Nextcloud ke berkas templatenya.\n\n${CONTOH_TAUTAN}`,
+      { reply_markup: batalKb }
+    );
   }
 
   while (true) {
-    const next = await conversation.waitFor(["message:document", "callback_query:data"]);
+    const next = await conversation.waitFor(["message:text", "callback_query:data"]);
     if (next.callbackQuery) {
       await next.answerCallbackQuery();
       await ctx.reply("Dibatalkan.", { reply_markup: menuUtama() });
       return;
     }
 
-    const berkas = berkasDariPesan(next);
-    if (!berkas) continue;
+    const tautanTeks = next.message?.text?.trim();
+    if (!tautanTeks) continue;
 
-    const error = validasiDokumen(berkas.mimeType, berkas.ukuran);
-    if (error) {
-      await ctx.reply(`⚠️ ${error} Kirim ulang file yang sesuai.`);
-      continue;
-    }
-
-    await ctx.reply("⏳ Mengunggah ke Nextcloud…");
+    await ctx.reply("⏳ Memeriksa tautan di Nextcloud…");
 
     let template;
     try {
-      const isiFile = await conversation.external(() => unduhFileTelegram(ctx, berkas.fileId));
       template = await conversation.external(() =>
-        tambahTemplate({
-          kode: kode!,
-          judul: judul!,
-          namaFile: berkas.namaFile,
-          mimeType: berkas.mimeType,
-          isiFile,
-        })
+        daftarkanTemplateDariTautan({ kode: kode!, judul: judul!, tautan: tautanTeks })
       );
     } catch (err) {
+      // Tautan salah ketik itu hal biasa, jadi wizard tidak keluar — admin bisa
+      // langsung menempel ulang tanpa mengisi kode & judul dari awal.
+      if (err instanceof TautanTidakValidError || err instanceof TemplateGandaError) {
+        await ctx.reply(`⚠️ ${err.message}\n\nKirim tautan lain, atau batalkan.`, {
+          reply_markup: batalKb,
+        });
+        continue;
+      }
       const pesan =
         err instanceof NextcloudError
-          ? `Nextcloud menolak unggahan: ${err.message}`
-          : "Gagal mengunggah template.";
+          ? `Nextcloud menolak permintaan: ${err.message}`
+          : "Gagal mendaftarkan template.";
       await ctx.reply(`⚠️ ${pesan} Coba lagi, atau hubungi admin.`, { reply_markup: menuUtama() });
       return;
     }
@@ -119,7 +131,8 @@ export async function tambahTemplateConvo(
       ? `\n${tautanTersamar(`📄 Buka ${template.namaFile}`, template.shareUrl)}`
       : "";
     await ctx.reply(
-      `✅ Template <b>${escapeHtml(template.judul)}</b> (kode: ${escapeHtml(template.kode)}) tersimpan di Nextcloud.${tautan}`,
+      `✅ Template <b>${escapeHtml(template.judul)}</b> (kode: ${escapeHtml(template.kode)}) terdaftar.\n` +
+        `Berkas: ${escapeHtml(template.namaFile)} (${formatUkuran(template.ukuran)})${tautan}`,
       { ...OPSI_TAUTAN, reply_markup: menuUtama() }
     );
     return;

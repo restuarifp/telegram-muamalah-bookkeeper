@@ -6,11 +6,12 @@ import {
   daftarBerkas,
   hapusBerkas,
   hapusTautan,
+  infoBerkas,
   normalisasiPath,
   pindahBerkas,
+  resolveTautanNextcloud,
   tautanPublik,
   unggahBerkas,
-  type BerkasNextcloud,
 } from "./nextcloud.js";
 
 const MIME_DIIZINKAN = new Set([
@@ -250,51 +251,48 @@ export async function ambilTemplateByKode(kode: string) {
   return prisma.template.findUnique({ where: { kode } });
 }
 
-export async function tambahTemplate(opts: {
+export class TemplateGandaError extends Error {
+  constructor(readonly judulLain: string) {
+    super(`Berkas itu sudah terdaftar sebagai template "${judulLain}".`);
+    this.name = "TemplateGandaError";
+  }
+}
+
+/**
+ * Mendaftarkan berkas Nextcloud yang **sudah ada** sebagai template, dari
+ * tautannya. Berkasnya tidak disalin maupun dipindah: bot hanya mencatat
+ * penunjuk ke sana dan menyiapkan link berbaginya.
+ *
+ * Karena itu template boleh tinggal di folder mana pun, tidak harus di folder
+ * template — yang menentukan bukan lokasinya, melainkan pendaftarannya di sini.
+ */
+export async function daftarkanTemplateDariTautan(opts: {
   kode: string;
   judul: string;
-  namaFile: string;
-  mimeType: string;
-  isiFile: Buffer;
+  tautan: string;
 }) {
-  const folder = folderTemplate();
-  const lama = await prisma.template.findUnique({ where: { kode: opts.kode } });
+  const berkas = await resolveTautanNextcloud(opts.tautan);
 
-  // Untuk kode yang sudah ada, berkas lamanya diganti (dan dibuang) supaya satu
-  // kode template selalu memetakan tepat ke satu berkas di Nextcloud.
-  const nama =
-    lama && lama.namaFile === amankanNamaBerkas(opts.namaFile)
-      ? lama.namaFile
-      : await namaBelumTerpakai(folder, amankanNamaBerkas(opts.namaFile));
-  const remotePath = `${folder}/${nama}`;
+  // remotePath unik di skema; tanpa cek ini, mendaftarkan berkas yang sama untuk
+  // kode kedua akan gagal sebagai error constraint yang tidak bisa dibaca operator.
+  const sudahAda = await prisma.template.findUnique({ where: { remotePath: berkas.path } });
+  if (sudahAda && sudahAda.kode !== opts.kode) throw new TemplateGandaError(sudahAda.judul);
 
-  await unggahBerkas(remotePath, opts.isiFile, opts.mimeType);
-  if (lama && lama.remotePath !== remotePath) {
-    await hapusBerkas(lama.remotePath).catch(() => {});
-  }
-  const tautan = await tautanPublik(remotePath);
+  const tautan = await tautanPublik(berkas.path);
+  const data = {
+    judul: opts.judul,
+    namaFile: berkas.nama,
+    mimeType: berkas.mimeType,
+    ukuran: berkas.ukuran,
+    remotePath: berkas.path,
+    shareToken: tautan.token,
+    shareUrl: tautan.url,
+  };
 
   return prisma.template.upsert({
     where: { kode: opts.kode },
-    create: {
-      kode: opts.kode,
-      judul: opts.judul,
-      namaFile: nama,
-      mimeType: opts.mimeType,
-      ukuran: opts.isiFile.byteLength,
-      remotePath,
-      shareToken: tautan.token,
-      shareUrl: tautan.url,
-    },
-    update: {
-      judul: opts.judul,
-      namaFile: nama,
-      mimeType: opts.mimeType,
-      ukuran: opts.isiFile.byteLength,
-      remotePath,
-      shareToken: tautan.token,
-      shareUrl: tautan.url,
-    },
+    create: { kode: opts.kode, ...data },
+    update: data,
   });
 }
 
@@ -316,71 +314,74 @@ export async function tautanTemplate(id: number): Promise<string | null> {
 }
 
 /**
- * Menghapus template beserta berkasnya di Nextcloud. Berkasnya ikut dibuang —
- * kalau hanya barisnya yang dihapus, sinkronTemplate() akan memungutnya kembali
- * pada pemanggilan berikutnya dan penghapusan jadi terasa tidak berefek.
+ * Melepas template dari daftar bot. **Berkasnya di Nextcloud tidak disentuh.**
+ *
+ * Template didaftarkan dari tautan ke berkas yang sudah ada — bot tidak pernah
+ * jadi pemiliknya, dan berkas yang sama bisa saja dipakai di luar bot. Ikut
+ * menghapusnya berarti mengambil keputusan atas milik orang lain. Link berbagi
+ * juga dibiarkan hidup, karena share-nya bisa dibuat manusia lebih dulu dan
+ * tautanPublik() memang memakai ulang share yang sudah ada.
  */
-export async function hapusTemplate(id: number) {
+export async function lepasTemplate(id: number) {
   const t = await prisma.template.findUnique({ where: { id } });
   if (!t) return null;
-
-  if (t.shareToken) await cabutShare(t.remotePath).catch(() => {});
-  await hapusBerkas(t.remotePath);
   return prisma.template.delete({ where: { id } });
 }
 
-/** Kode template dari nama berkas, mis. "Template Akad Qardh.docx" → "akad-qardh". */
-function kodeDariNamaBerkas(nama: string): string {
-  const titik = nama.lastIndexOf(".");
-  const dasar = titik > 0 ? nama.slice(0, titik) : nama;
-  return slug(dasar.replace(/^template\s*/i, ""));
-}
-
 /**
- * Mendaftarkan berkas yang sudah ada di folder template Nextcloud ke database,
- * dan membuang baris yang berkasnya sudah tidak ada. Dipakai untuk memungut
- * template yang ditaruh langsung lewat web Nextcloud.
+ * Menyegarkan tiap template terdaftar terhadap keadaan Nextcloud: metadata
+ * (nama berkas, ukuran, tipe) diperbarui kalau berkasnya diubah dari sisi
+ * Nextcloud, dan baris yang berkasnya sudah tidak ada dilepas.
+ *
+ * Sinkron sengaja **tidak** mendaftarkan berkas baru sendiri. Sejak pendaftaran
+ * dilakukan lewat tautan, daftar template adalah pilihan sadar admin — kalau
+ * sinkron ikut memungut semua isi folder, template yang baru saja dilepas akan
+ * muncul lagi dan pelepasan jadi terasa tidak berefek. Berkas folder template
+ * yang belum terdaftar hanya dilaporkan, biar admin yang memutuskan.
  */
 export async function sinkronTemplate(): Promise<{
-  ditambah: string[];
-  dihapus: string[];
+  diperbarui: string[];
+  dilepas: string[];
+  belumTerdaftar: string[];
 }> {
-  const folder = folderTemplate();
-  const [berkas, tercatat] = await Promise.all([daftarBerkas(folder), prisma.template.findMany()]);
+  const tercatat = await prisma.template.findMany();
+  const diperbarui: string[] = [];
+  const dilepas: { id: number; judul: string }[] = [];
 
+  for (const t of tercatat) {
+    const berkas = await infoBerkas(t.remotePath);
+    if (!berkas) {
+      dilepas.push({ id: t.id, judul: t.judul });
+      continue;
+    }
+    if (
+      berkas.nama !== t.namaFile ||
+      berkas.ukuran !== t.ukuran ||
+      berkas.mimeType !== t.mimeType ||
+      !t.shareUrl
+    ) {
+      const tautan = t.shareUrl ? null : await tautanPublik(berkas.path).catch(() => null);
+      await prisma.template.update({
+        where: { id: t.id },
+        data: {
+          namaFile: berkas.nama,
+          ukuran: berkas.ukuran,
+          mimeType: berkas.mimeType,
+          ...(tautan ? { shareToken: tautan.token, shareUrl: tautan.url } : {}),
+        },
+      });
+      diperbarui.push(t.judul);
+    }
+  }
+
+  if (dilepas.length > 0) {
+    await prisma.template.deleteMany({ where: { id: { in: dilepas.map((t) => t.id) } } });
+  }
+
+  // Sekadar laporan: isi folder template yang belum jadi template terdaftar.
   const pathTercatat = new Set(tercatat.map((t) => t.remotePath));
-  const kodeTerpakai = new Set(tercatat.map((t) => t.kode));
-  const ditambah: string[] = [];
+  const isiFolder = await daftarBerkas(folderTemplate()).catch(() => []);
+  const belumTerdaftar = isiFolder.filter((b) => !pathTercatat.has(b.path)).map((b) => b.nama);
 
-  for (const b of berkas.filter((b: BerkasNextcloud) => !pathTercatat.has(b.path))) {
-    // Kode wajib unik; tabrakan diselesaikan dengan akhiran angka agar sinkron
-    // tidak berhenti di tengah jalan hanya karena dua nama berkas mirip.
-    let kode = kodeDariNamaBerkas(b.nama);
-    for (let i = 2; kodeTerpakai.has(kode); i++) kode = `${kodeDariNamaBerkas(b.nama)}-${i}`;
-    kodeTerpakai.add(kode);
-
-    const tautan = await tautanPublik(b.path).catch(() => null);
-    const judul = b.nama.replace(/\.[^.]+$/, "");
-    await prisma.template.create({
-      data: {
-        kode,
-        judul,
-        namaFile: b.nama,
-        mimeType: b.mimeType,
-        ukuran: b.ukuran,
-        remotePath: b.path,
-        shareToken: tautan?.token ?? null,
-        shareUrl: tautan?.url ?? null,
-      },
-    });
-    ditambah.push(judul);
-  }
-
-  const pathRemote = new Set(berkas.map((b) => b.path));
-  const hilang = tercatat.filter((t) => !pathRemote.has(t.remotePath));
-  if (hilang.length > 0) {
-    await prisma.template.deleteMany({ where: { id: { in: hilang.map((t) => t.id) } } });
-  }
-
-  return { ditambah, dihapus: hilang.map((t) => t.judul) };
+  return { diperbarui, dilepas: dilepas.map((t) => t.judul), belumTerdaftar };
 }

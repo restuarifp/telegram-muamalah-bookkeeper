@@ -13,7 +13,7 @@ Sistem manajemen dan pencatatan muamalah non-tunai (utang-piutang, investasi, qa
   - Tunggakan digabung jadi satu pesan per transaksi ("3 cicilan tertunggak (ke-1 s/d ke-3) — total Rp …"), supaya enam cicilan telat tidak jadi enam pesan.
   - `jatuhTempo` transaksi tidak ikut memicu pengingat kalau ada skema cicilan, agar tidak dobel dengan cicilan terakhir.
   - Dedup memakai kunci `(muamalahId, urutanCicilan, offsetHari)`; tunggakan ditagih ulang tiap kelipatan 7 hari.
-- **Manajemen dokumen akad di Nextcloud** — berkas tidak lagi disimpan di disk bot maupun dikirim ulang lewat Telegram: setiap unggahan diteruskan ke Nextcloud, dan yang beredar di chat hanya **tautan berbagi publiknya** (lihat [Dokumen & template](#dokumen--template-nextcloud)).
+- **Manajemen dokumen akad di Nextcloud** — berkas tidak lagi disimpan di disk bot maupun dikirim ulang lewat Telegram: setiap unggahan diteruskan ke Nextcloud, dan yang beredar di chat hanya **tautan berbagi publiknya**. Template akad tidak diunggah sama sekali — admin mendaftarkannya dengan **mengirim tautan Nextcloud** ke berkas yang sudah ada (lihat [Dokumen & template](#dokumen--template-nextcloud)).
 - **Rekap** (`/rekap`) dan **manajemen operator** (`/operator_list`, `/operator_tambah`, `/operator_hapus`, admin-only) dengan audit log di setiap mutasi.
 
 ## Dokumen & template (Nextcloud)
@@ -38,17 +38,38 @@ Folder per transaksi diawali ID-nya, sehingga tetap bisa dicocokkan ke transaksi
 
 ### Operasi yang tersedia
 
+Dokumen akad dan template akad sengaja punya model kepemilikan yang berbeda:
+
+- **Dokumen akad — bot yang menaruh.** Operator mengirim berkasnya lewat Telegram, bot mengunggahnya ke folder transaksi. Karena bot yang membuat berkas itu, bot juga boleh mengganti nama dan menghapusnya.
+- **Template akad — bot cuma menunjuk.** Berkasnya sudah ada di Nextcloud; admin mendaftarkannya dengan **mengirim tautan**. Bot tidak pernah menyalin, memindah, atau menghapus berkas template.
+
 | Aksi | Dokumen per akad | Template akad |
 | --- | --- | --- |
-| Tambah | detail transaksi → **⬆️ Unggah** | `/template_tambah` (admin) |
+| Tambah | detail transaksi → **⬆️ Unggah** (kirim berkas) | `/template_tambah` → **kirim tautan Nextcloud** (admin) |
 | Lihat | detail transaksi → **📎 Dokumen** | `/template` |
-| Ubah | **✏️ Ubah Nama** (WebDAV `MOVE`) | **✏️ Ubah Judul**, **♻️ Ganti Berkas** (admin) |
-| Hapus | **🗑️ Hapus** | **🗑️ Hapus** (admin) |
+| Ubah | **✏️ Ubah Nama** (WebDAV `MOVE`) | **✏️ Ubah Judul**, **🔗 Ganti Tautan** (admin) |
+| Hapus | **🗑️ Hapus** — berkas ikut dibuang | **🗑️ Lepas dari daftar** — berkas tetap utuh (admin) |
 | Selaraskan | **🔄 Sinkron** per transaksi | `/template_sinkron` (admin) |
 
-Hapus selalu ikut membuang berkasnya di Nextcloud dan mencabut link berbaginya — kalau hanya barisnya yang dihapus, sinkron berikutnya akan memungutnya kembali dan penghapusan terasa tidak berefek.
+### Mendaftarkan template lewat tautan
 
-**Sinkron** menyelaraskan database dengan isi folder Nextcloud dua arah: berkas yang ditaruh langsung lewat web Nextcloud didaftarkan (lengkap dengan link berbaginya), dan baris yang berkasnya sudah tidak ada dilepas. Ini yang membuat pengelolaan dari sisi Nextcloud tidak membuat data bot jadi bohong.
+`/template_tambah` menanyakan kode, judul, lalu tautannya. Yang diterima — semuanya bisa disalin langsung dari web Nextcloud:
+
+| Bentuk | Contoh |
+| --- | --- |
+| Tautan berkas di web Files | `…/apps/files/files/483?dir=/Documents/…` |
+| Permalink "Copy direct link" | `…/f/483` |
+| Link berbagi publik | `…/s/D4M5TY72wk42sjf` |
+| URL WebDAV | `…/remote.php/dav/files/admin/Documents/…` |
+| Path mentah | `/Documents/Akad Muamalah/Template Akad/Qardh.docx` |
+
+Bentuk ber-`fileid` diterjemahkan lewat **DAV SEARCH** (endpoint `/remote.php/dav/meta/<id>` tidak tersedia di Nextcloud ini), jadi tautan tetap valid walau berkasnya nanti dipindah folder. Tautan dari host lain ditolak sebelum menyentuh jaringan, dan tautan salah ketik tidak mengeluarkan admin dari wizard — tinggal tempel ulang.
+
+Karena yang dicatat adalah penunjuk, **template boleh tinggal di folder mana pun**, tidak harus di folder template. Satu berkas hanya boleh dipakai satu kode template; percobaan mendaftarkannya lagi ditolak dengan menyebut template yang sudah memakainya.
+
+**Sinkron template** bersifat *perbaikan*, bukan penemuan: tiap template terdaftar diperiksa ke Nextcloud, metadatanya (nama berkas, ukuran, tipe) disegarkan kalau berubah, dan baris yang berkasnya sudah tidak ada dilepas. Berkas folder template yang belum terdaftar hanya **dilaporkan**, tidak didaftarkan otomatis — kalau sinkron ikut memungut isi folder, template yang baru saja dilepas admin akan muncul lagi dan pelepasan jadi terasa tidak berefek.
+
+**Sinkron dokumen** (per transaksi) tetap dua arah: berkas yang ditaruh langsung lewat web Nextcloud didaftarkan, dan baris yang berkasnya hilang dilepas — di sana folder transaksi memang milik bot.
 
 ### Kredensial
 

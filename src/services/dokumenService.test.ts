@@ -9,14 +9,24 @@ const prisma = {
     deleteMany: vi.fn(),
     findMany: vi.fn(),
   },
-  template: { findMany: vi.fn(), create: vi.fn(), deleteMany: vi.fn() },
+  template: {
+    findMany: vi.fn(),
+    findUnique: vi.fn(),
+    create: vi.fn(),
+    update: vi.fn(),
+    upsert: vi.fn(),
+    delete: vi.fn(),
+    deleteMany: vi.fn(),
+  },
 };
 
 const nextcloud = {
   daftarBerkas: vi.fn(),
   hapusBerkas: vi.fn(),
   hapusTautan: vi.fn(),
+  infoBerkas: vi.fn(),
   pindahBerkas: vi.fn(),
+  resolveTautanNextcloud: vi.fn(),
   tautanPublik: vi.fn(),
   unggahBerkas: vi.fn(),
   // Fungsi murni ini tidak perlu diganti palsu — perilaku aslinya yang diuji.
@@ -56,6 +66,9 @@ const {
   ubahNamaDokumen,
   sinkronDokumen,
   sinkronTemplate,
+  daftarkanTemplateDariTautan,
+  lepasTemplate,
+  TemplateGandaError,
   validasiDokumen,
 } = await import("./dokumenService.js");
 
@@ -212,33 +225,131 @@ describe("sinkronDokumen", () => {
   });
 });
 
+describe("daftarkanTemplateDariTautan", () => {
+  const berkas = {
+    path: `${BASE}/Template Akad/Akad Qardh.docx`,
+    nama: "Akad Qardh.docx",
+    ukuran: 18149,
+    mimeType: "application/msword",
+    diubahPada: null,
+  };
+
+  it("mencatat penunjuk ke berkas yang sudah ada, tanpa mengunggah apa pun", async () => {
+    nextcloud.resolveTautanNextcloud.mockResolvedValue(berkas);
+    prisma.template.findUnique.mockResolvedValue(null);
+    prisma.template.upsert.mockImplementation(async ({ create }: any) => ({ id: 1, ...create }));
+
+    const hasil = await daftarkanTemplateDariTautan({
+      kode: "qardh",
+      judul: "Akad Qardh",
+      tautan: "https://nc.example.com/apps/files/files/483?dir=/x",
+    });
+
+    // Inti perubahan: template didaftarkan, bukan disalin/dipindah.
+    expect(nextcloud.unggahBerkas).not.toHaveBeenCalled();
+    expect(nextcloud.pindahBerkas).not.toHaveBeenCalled();
+    expect(nextcloud.hapusBerkas).not.toHaveBeenCalled();
+    expect(hasil.remotePath).toBe(berkas.path);
+    expect(hasil.namaFile).toBe("Akad Qardh.docx");
+    expect(hasil.ukuran).toBe(18149);
+    expect(hasil.shareUrl).toBe("https://nc.example.com/s/tok123");
+  });
+
+  it("menolak berkas yang sudah dipakai kode template lain", async () => {
+    nextcloud.resolveTautanNextcloud.mockResolvedValue(berkas);
+    prisma.template.findUnique.mockResolvedValue({
+      id: 7,
+      kode: "qardh-lama",
+      judul: "Akad Qardh (lama)",
+      remotePath: berkas.path,
+    });
+
+    await expect(
+      daftarkanTemplateDariTautan({ kode: "qardh", judul: "Akad Qardh", tautan: "/x" })
+    ).rejects.toThrow(TemplateGandaError);
+    expect(prisma.template.upsert).not.toHaveBeenCalled();
+  });
+
+  it("membiarkan pendaftaran ulang untuk kode yang sama (ganti tautan)", async () => {
+    nextcloud.resolveTautanNextcloud.mockResolvedValue(berkas);
+    prisma.template.findUnique.mockResolvedValue({
+      id: 7,
+      kode: "qardh",
+      judul: "Akad Qardh",
+      remotePath: berkas.path,
+    });
+    prisma.template.upsert.mockImplementation(async ({ create }: any) => ({ id: 7, ...create }));
+
+    await expect(
+      daftarkanTemplateDariTautan({ kode: "qardh", judul: "Akad Qardh", tautan: "/x" })
+    ).resolves.toBeTruthy();
+  });
+});
+
+describe("lepasTemplate", () => {
+  it("hanya menghapus barisnya — berkas Nextcloud tidak disentuh", async () => {
+    prisma.template.findUnique.mockResolvedValue({
+      id: 3,
+      kode: "qardh",
+      judul: "Akad Qardh",
+      remotePath: `${BASE}/Template Akad/Akad Qardh.docx`,
+      shareToken: "tok123",
+    });
+    prisma.template.delete.mockResolvedValue({ id: 3 });
+
+    await lepasTemplate(3);
+
+    expect(prisma.template.delete).toHaveBeenCalledWith({ where: { id: 3 } });
+    // Bot bukan pemilik berkasnya, jadi tidak boleh menghapus atau mencabut share.
+    expect(nextcloud.hapusBerkas).not.toHaveBeenCalled();
+    expect(nextcloud.hapusTautan).not.toHaveBeenCalled();
+  });
+});
+
 describe("sinkronTemplate", () => {
-  it("menurunkan kode dari nama berkas dan menghindari tabrakan kode", async () => {
-    const dir = `${BASE}/Template Akad`;
-    nextcloud.daftarBerkas.mockResolvedValue([
-      { path: `${dir}/Template Akad Qardh.docx`, nama: "Template Akad Qardh.docx", ukuran: 1, mimeType: "application/msword" },
-      { path: `${dir}/Akad Qardh.pdf`, nama: "Akad Qardh.pdf", ukuran: 2, mimeType: "application/pdf" },
+  const path = `${BASE}/Template Akad/Akad Qardh.docx`;
+
+  it("menyegarkan metadata template yang berubah di Nextcloud", async () => {
+    prisma.template.findMany.mockResolvedValue([
+      { id: 1, kode: "qardh", judul: "Akad Qardh", remotePath: path, namaFile: "Akad Qardh.docx", ukuran: 100, mimeType: "application/msword", shareUrl: "https://nc.example.com/s/tok123" },
     ]);
-    prisma.template.findMany.mockResolvedValue([]);
+    nextcloud.infoBerkas.mockResolvedValue({
+      path, nama: "Akad Qardh.docx", ukuran: 555, mimeType: "application/pdf", diubahPada: null,
+    });
 
     const hasil = await sinkronTemplate();
 
-    const kode = prisma.template.create.mock.calls.map((c: any) => c[0].data.kode);
-    expect(kode).toEqual(["akad-qardh", "akad-qardh-2"]);
-    expect(hasil.ditambah).toEqual(["Template Akad Qardh", "Akad Qardh"]);
-    expect(hasil.dihapus).toEqual([]);
+    expect(hasil.diperbarui).toEqual(["Akad Qardh"]);
+    expect(prisma.template.update.mock.calls[0][0].data).toMatchObject({
+      ukuran: 555,
+      mimeType: "application/pdf",
+    });
   });
 
   it("melepas template yang berkasnya sudah tidak ada di Nextcloud", async () => {
-    nextcloud.daftarBerkas.mockResolvedValue([]);
     prisma.template.findMany.mockResolvedValue([
       { id: 4, kode: "qardh", judul: "Akad Qardh", remotePath: "/hilang.docx" },
+    ]);
+    nextcloud.infoBerkas.mockResolvedValue(null);
+
+    const hasil = await sinkronTemplate();
+
+    expect(hasil.dilepas).toEqual(["Akad Qardh"]);
+    expect(prisma.template.deleteMany).toHaveBeenCalledWith({ where: { id: { in: [4] } } });
+  });
+
+  it("melaporkan berkas folder template yang belum terdaftar, tanpa mendaftarkannya sendiri", async () => {
+    // Kalau sinkron ikut memungut isi folder, template yang baru dilepas admin
+    // akan muncul lagi dan pelepasan jadi terasa tidak berefek.
+    prisma.template.findMany.mockResolvedValue([]);
+    nextcloud.daftarBerkas.mockResolvedValue([
+      { path: `${BASE}/Template Akad/Belum.docx`, nama: "Belum.docx", ukuran: 1, mimeType: "application/msword" },
     ]);
 
     const hasil = await sinkronTemplate();
 
-    expect(hasil.dihapus).toEqual(["Akad Qardh"]);
-    expect(prisma.template.deleteMany).toHaveBeenCalledWith({ where: { id: { in: [4] } } });
+    expect(hasil.belumTerdaftar).toEqual(["Belum.docx"]);
+    expect(prisma.template.create).not.toHaveBeenCalled();
   });
 });
 

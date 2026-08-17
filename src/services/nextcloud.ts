@@ -204,28 +204,21 @@ function pathDariHref(href: string): string {
 }
 
 /**
- * Mendaftar isi folder (non-rekursif). Folder itu sendiri dan subfolder
- * disaring keluar — pemanggil hanya butuh berkas.
+ * Mengurai balasan multistatus (PROPFIND maupun SEARCH) jadi daftar berkas.
+ * Folder disaring keluar — semua pemanggil hanya butuh berkas.
+ *
+ * @param lewatiPath path yang tidak ikut dikembalikan, dipakai PROPFIND Depth:1
+ *   untuk membuang entri folder yang ditanyakan itu sendiri.
  */
-export async function daftarBerkas(folder: string): Promise<BerkasNextcloud[]> {
-  const path = normalisasiPath(folder);
-  const res = await davFetch("PROPFIND", path, {
-    body: PROPFIND_BODY,
-    headers: { Depth: "1", "Content-Type": "application/xml" },
-  });
-  if (res.status === 404) return [];
-  await pastikanSukses(res, `Membaca folder "${path}"`);
-
-  const parsed = parser.parse(await res.text()) as {
-    multistatus?: { response?: ResponsePropfind[] };
-  };
+function uraikanMultistatus(xml: string, lewatiPath?: string): BerkasNextcloud[] {
+  const parsed = parser.parse(xml) as { multistatus?: { response?: ResponsePropfind[] } };
   const responses = parsed.multistatus?.response ?? [];
 
   const hasil: BerkasNextcloud[] = [];
   for (const r of responses) {
     if (!r.href) continue;
     const itemPath = pathDariHref(String(r.href));
-    if (itemPath === path) continue; // folder itu sendiri
+    if (lewatiPath && itemPath === lewatiPath) continue;
 
     const prop = propsDari(r);
     // <resourcetype><collection/></resourcetype> menandai folder; berkas biasa
@@ -245,12 +238,68 @@ export async function daftarBerkas(folder: string): Promise<BerkasNextcloud[]> {
       diubahPada: modified && !Number.isNaN(modified.getTime()) ? modified : null,
     });
   }
-  return hasil.sort((a, b) => a.nama.localeCompare(b.nama, "id"));
+  return hasil;
+}
+
+/**
+ * Mendaftar isi folder (non-rekursif). Folder itu sendiri dan subfolder
+ * disaring keluar — pemanggil hanya butuh berkas.
+ */
+export async function daftarBerkas(folder: string): Promise<BerkasNextcloud[]> {
+  const path = normalisasiPath(folder);
+  const res = await davFetch("PROPFIND", path, {
+    body: PROPFIND_BODY,
+    headers: { Depth: "1", "Content-Type": "application/xml" },
+  });
+  if (res.status === 404) return [];
+  await pastikanSukses(res, `Membaca folder "${path}"`);
+
+  return uraikanMultistatus(await res.text(), path).sort((a, b) =>
+    a.nama.localeCompare(b.nama, "id")
+  );
+}
+
+/** Metadata satu berkas; null kalau tidak ada atau ternyata folder. */
+export async function infoBerkas(path: string): Promise<BerkasNextcloud | null> {
+  const target = normalisasiPath(path);
+  const res = await davFetch("PROPFIND", target, {
+    body: PROPFIND_BODY,
+    headers: { Depth: "0", "Content-Type": "application/xml" },
+  });
+  if (res.status === 404) return null;
+  await pastikanSukses(res, `Membaca "${target}"`);
+  return uraikanMultistatus(await res.text())[0] ?? null;
 }
 
 export async function berkasAda(path: string): Promise<boolean> {
   const res = await davFetch("PROPFIND", normalisasiPath(path), { headers: { Depth: "0" } });
   return res.ok;
+}
+
+/**
+ * Mencari berkas berdasarkan fileid Nextcloud, ke seluruh folder milik user.
+ *
+ * Dipakai untuk menerjemahkan tautan yang disalin dari web Nextcloud: URL-nya
+ * membawa fileid, bukan path. Endpoint /remote.php/dav/meta/<id> tidak tersedia
+ * di server ini, jadi dipakai DAV SEARCH yang memang didukung.
+ */
+export async function cariBerkasByFileId(fileId: string): Promise<BerkasNextcloud | null> {
+  const body = `<?xml version="1.0" encoding="UTF-8"?>
+<d:searchrequest xmlns:d="DAV:" xmlns:oc="http://owncloud.org/ns">
+ <d:basicsearch>
+  <d:select><d:prop><d:getcontenttype/><d:getcontentlength/><d:getlastmodified/><d:resourcetype/></d:prop></d:select>
+  <d:from><d:scope><d:href>/files/${encodeURIComponent(config.nextcloud.username)}</d:href><d:depth>infinity</d:depth></d:scope></d:from>
+  <d:where><d:eq><d:prop><oc:fileid/></d:prop><d:literal>${Number(fileId)}</d:literal></d:eq></d:where>
+ </d:basicsearch>
+</d:searchrequest>`;
+
+  const res = await fetch(`${config.nextcloud.baseUrl}/remote.php/dav/`, {
+    method: "SEARCH",
+    headers: { Authorization: auth(), "Content-Type": "text/xml" },
+    body,
+  });
+  if (!res.ok) return null;
+  return uraikanMultistatus(await res.text())[0] ?? null;
 }
 
 // --- OCS Share API ---------------------------------------------------------
@@ -355,4 +404,117 @@ export async function hapusTautan(shareId: string): Promise<void> {
 /** Link unduh langsung dari sebuah link berbagi publik. */
 export function urlUnduh(shareUrl: string): string {
   return `${shareUrl.replace(/\/+$/, "")}/download`;
+}
+
+/** Path berkas di balik sebuah token share publik; null bila token tak dikenal. */
+async function pathDariShareToken(token: string): Promise<string | null> {
+  const ocs = await ocsFetch("GET", `${SHARE_ENDPOINT}?reshares=true`);
+  if (ocs.meta.statuscode !== 200 && ocs.meta.statuscode !== 100) return null;
+  const shares = (Array.isArray(ocs.data) ? ocs.data : []) as ShareOcs[];
+  const cocok = shares.find((s) => s.token === token);
+  return cocok ? normalisasiPath(cocok.path) : null;
+}
+
+// --- Penerjemahan tautan ---------------------------------------------------
+
+/** Kegagalan yang penyebabnya ada di tautan yang diketik, bukan di server. */
+export class TautanTidakValidError extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "TautanTidakValidError";
+  }
+}
+
+/**
+ * Mengambil fileid dari bentuk-bentuk URL Nextcloud yang biasa disalin operator:
+ * - /apps/files/files/<id>?dir=...   (tombol salin di web Files)
+ * - /f/<id>                          (permalink "Copy direct link")
+ * - ...?fileid=<id>                  (bentuk lama)
+ */
+function fileIdDariUrl(url: URL): string | null {
+  const fromQuery = url.searchParams.get("fileid");
+  if (fromQuery && /^\d+$/.test(fromQuery)) return fromQuery;
+
+  const cocok =
+    url.pathname.match(/\/apps\/files\/files\/(\d+)/) ?? url.pathname.match(/\/f\/(\d+)\/?$/);
+  return cocok ? cocok[1] : null;
+}
+
+/**
+ * Menerjemahkan tautan Nextcloud (atau path mentah) jadi berkas yang konkret.
+ *
+ * Menerima empat bentuk yang semuanya bisa disalin langsung dari web Nextcloud —
+ * tautan berkas, permalink, link berbagi publik, dan URL WebDAV — plus path
+ * apa adanya, supaya operator tidak perlu tahu bentuk mana yang "benar".
+ */
+export async function resolveTautanNextcloud(input: string): Promise<BerkasNextcloud> {
+  const teks = input.trim();
+  if (!teks) throw new TautanTidakValidError("Tautannya kosong.");
+
+  // Path mentah, mis. "/Documents/Akad Muamalah/Template Akad/Qardh.docx".
+  if (teks.startsWith("/") && !teks.startsWith("//")) {
+    const berkas = await infoBerkas(teks);
+    if (!berkas) {
+      throw new TautanTidakValidError(`Tidak ada berkas di path "${teks}" pada Nextcloud.`);
+    }
+    return berkas;
+  }
+
+  let url: URL;
+  try {
+    url = new URL(teks);
+  } catch {
+    throw new TautanTidakValidError(
+      "Bukan tautan yang bisa dibaca. Salin URL berkas dari web Nextcloud, atau ketik path-nya diawali \"/\"."
+    );
+  }
+
+  // Tautan dari server lain tidak akan pernah bisa diakses dengan kredensial kita,
+  // dan menyimpannya diam-diam akan menghasilkan template yang selalu gagal dibuka.
+  const hostBot = new URL(config.nextcloud.baseUrl).host;
+  if (url.host !== hostBot) {
+    throw new TautanTidakValidError(
+      `Tautan ini dari "${url.host}", sedangkan bot memakai "${hostBot}".`
+    );
+  }
+
+  // URL WebDAV: sisanya setelah prefix sudah berupa path.
+  const prefixDav = `/remote.php/dav/files/${encodeURIComponent(config.nextcloud.username)}`;
+  if (url.pathname.startsWith(prefixDav)) {
+    const path = normalisasiPath(decodeURIComponent(url.pathname.slice(prefixDav.length)));
+    const berkas = await infoBerkas(path);
+    if (!berkas) throw new TautanTidakValidError(`Tidak ada berkas di "${path}".`);
+    return berkas;
+  }
+
+  // Link berbagi publik /s/<token>.
+  const share = url.pathname.match(/\/s\/([A-Za-z0-9]+)/);
+  if (share) {
+    const path = await pathDariShareToken(share[1]);
+    if (!path) {
+      throw new TautanTidakValidError(
+        "Link berbagi ini tidak dikenali. Pastikan share-nya dibuat oleh akun Nextcloud yang dipakai bot."
+      );
+    }
+    const berkas = await infoBerkas(path);
+    if (!berkas) {
+      throw new TautanTidakValidError(`Berkas di balik link berbagi itu sudah tidak ada ("${path}").`);
+    }
+    return berkas;
+  }
+
+  const fileId = fileIdDariUrl(url);
+  if (!fileId) {
+    throw new TautanTidakValidError(
+      "Tautan tidak memuat penunjuk berkas. Buka berkasnya di web Nextcloud lalu salin URL-nya dari bilah alamat."
+    );
+  }
+
+  const berkas = await cariBerkasByFileId(fileId);
+  if (!berkas) {
+    throw new TautanTidakValidError(
+      `Tidak ada berkas dengan id ${fileId} — mungkin sudah dipindah/dihapus, atau tautannya menunjuk ke folder, bukan berkas.`
+    );
+  }
+  return berkas;
 }

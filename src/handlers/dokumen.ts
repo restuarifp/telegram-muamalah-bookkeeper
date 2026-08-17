@@ -5,7 +5,7 @@ import {
   ambilTemplate,
   daftarTemplate,
   hapusDokumen,
-  hapusTemplate,
+  lepasTemplate,
   sinkronDokumen,
   sinkronTemplate,
   tautanDokumen,
@@ -77,7 +77,7 @@ async function tampilkanDaftarTemplate(ctx: BotContext) {
     templates.length === 0
       ? "Belum ada template akad terdaftar.\n" +
         (butuhAdmin(ctx)
-          ? "Tambah lewat tombol di bawah, atau taruh berkasnya di folder template Nextcloud lalu tekan 🔄 Sinkron."
+          ? "Tekan ➕ Tambah, lalu kirim tautan Nextcloud ke berkas templatenya."
           : "Hubungi admin untuk menambahkannya.")
       : `📎 Template akad tersedia (${templates.length}):\nKetuk salah satu untuk membuka.`;
 
@@ -106,9 +106,9 @@ async function tampilkanDetailTemplate(ctx: BotContext, id: number) {
   if (shareUrl) tombolBerkas(kb, shareUrl);
   if (butuhAdmin(ctx)) {
     kb.text("✏️ Ubah Judul", `dokumen:tpl:judul:${t.id}`)
-      .text("♻️ Ganti Berkas", `dokumen:tpl:ganti:${t.id}`)
+      .text("🔗 Ganti Tautan", `dokumen:tpl:ganti:${t.id}`)
       .row()
-      .text("🗑️ Hapus", `dokumen:tpl:hapus:${t.id}`)
+      .text("🗑️ Lepas dari daftar", `dokumen:tpl:hapus:${t.id}`)
       .row();
   }
   kb.text("⬅️ Daftar Template", "dokumen:tpl:list").text("🏠 Menu", "menu:utama");
@@ -167,7 +167,7 @@ dokumenComposer.callbackQuery(/^dokumen:tpl:ganti:(\d+)$/, async (ctx) => {
     await ctx.reply("Template tidak ditemukan.");
     return;
   }
-  // Wizard yang sama dipakai ulang dengan kode terisi, jadi langsung ke unggah.
+  // Wizard yang sama dipakai ulang dengan kode terisi, jadi langsung ke tautan.
   await ctx.conversation.enter("tambahTemplate", t.kode);
 });
 
@@ -183,11 +183,11 @@ dokumenComposer.callbackQuery(/^dokumen:tpl:hapus:(\d+)$/, async (ctx) => {
     return;
   }
   const kb = new InlineKeyboard()
-    .text("✅ Ya, hapus", `dokumen:tpl:hapus_ya:${t.id}`)
+    .text("✅ Ya, lepas", `dokumen:tpl:hapus_ya:${t.id}`)
     .text("❌ Batal", `dokumen:tpl:detail:${t.id}`);
   await ctx.reply(
-    `Hapus template <b>${escapeHtml(t.judul)}</b>?\n` +
-      `Berkas <i>${escapeHtml(t.namaFile)}</i> ikut dihapus dari Nextcloud dan link yang sudah dibagikan akan mati.`,
+    `Lepas template <b>${escapeHtml(t.judul)}</b> dari daftar?\n` +
+      `Berkas <i>${escapeHtml(t.namaFile)}</i> tetap ada di Nextcloud — bot cuma berhenti menawarkannya.`,
     { parse_mode: "HTML", reply_markup: kb }
   );
 });
@@ -196,7 +196,7 @@ dokumenComposer.callbackQuery(/^dokumen:tpl:hapus_ya:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!butuhAdmin(ctx)) return;
   const id = Number(ctx.match![1]);
-  const hasil = await coba(ctx, () => hapusTemplate(id));
+  const hasil = await coba(ctx, () => lepasTemplate(id));
   if (!hasil.ok) return;
   const t = hasil.nilai;
   if (!t) {
@@ -204,9 +204,10 @@ dokumenComposer.callbackQuery(/^dokumen:tpl:hapus_ya:(\d+)$/, async (ctx) => {
     return;
   }
   await catatAudit(ctx, "DELETE", "Template", id, { kode: t.kode, remotePath: t.remotePath });
-  await ctx.reply(`🗑️ Template "${t.judul}" dihapus beserta berkasnya di Nextcloud.`, {
-    reply_markup: new InlineKeyboard().text("⬅️ Daftar Template", "dokumen:tpl:list"),
-  });
+  await ctx.reply(
+    `🗑️ Template "${t.judul}" dilepas dari daftar. Berkasnya masih utuh di Nextcloud.`,
+    { reply_markup: new InlineKeyboard().text("⬅️ Daftar Template", "dokumen:tpl:list") }
+  );
 });
 
 dokumenComposer.command("template_sinkron", async (ctx) => {
@@ -227,15 +228,23 @@ dokumenComposer.callbackQuery("dokumen:tpl:sinkron", async (ctx) => {
 });
 
 async function jalankanSinkronTemplate(ctx: BotContext) {
-  await ctx.reply("⏳ Membaca folder template di Nextcloud…");
+  await ctx.reply("⏳ Memeriksa tiap template terdaftar di Nextcloud…");
   const dicoba = await coba(ctx, () => sinkronTemplate());
   if (!dicoba.ok) return;
   const hasil = dicoba.nilai;
 
   const baris: string[] = [];
-  if (hasil.ditambah.length) baris.push(`➕ Didaftarkan: ${hasil.ditambah.join(", ")}`);
-  if (hasil.dihapus.length) baris.push(`➖ Dilepas (berkas hilang): ${hasil.dihapus.join(", ")}`);
-  if (baris.length === 0) baris.push("Tidak ada perubahan — daftar template sudah sesuai Nextcloud.");
+  if (hasil.diperbarui.length) baris.push(`🔁 Data disegarkan: ${hasil.diperbarui.join(", ")}`);
+  if (hasil.dilepas.length) baris.push(`➖ Dilepas (berkas hilang): ${hasil.dilepas.join(", ")}`);
+  if (baris.length === 0) baris.push("Semua template terdaftar masih cocok dengan Nextcloud.");
+  if (hasil.belumTerdaftar.length) {
+    // Sengaja dilaporkan, bukan didaftarkan otomatis: daftar template adalah
+    // pilihan admin lewat /template_tambah.
+    baris.push(
+      `\nℹ️ ${hasil.belumTerdaftar.length} berkas di folder template belum terdaftar: ` +
+        `${hasil.belumTerdaftar.join(", ")}.\nDaftarkan lewat ➕ Tambah kalau memang mau dipakai.`
+    );
+  }
 
   await catatAudit(ctx, "SYNC", "Template", 0, hasil);
   await ctx.reply(`🔄 Sinkron template selesai.\n${baris.join("\n")}`, {
