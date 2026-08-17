@@ -53,3 +53,62 @@ groupInfoComposer.command("info", async (ctx) => {
   if (!ctx.chat) return;
   await ctx.reply(teksInfoChat(ctx.chat), { parse_mode: "Markdown" });
 });
+
+/**
+ * Teks balasan /init: identitas chat + identitas pemanggil, cukup untuk mengisi
+ * GROUP_ID dan ADMIN_IDS. Dipisah dari handler-nya supaya bisa diuji langsung.
+ */
+export function teksInit(
+  chat: { id: number; title?: string; type: string },
+  from?: { id: number; username?: string }
+): string {
+  const baris = [
+    `🔧 *Init Bot Muamalah*`,
+    ``,
+    `*Chat ini*`,
+    `Chat ID: \`${chat.id}\``,
+    `Tipe: ${chat.type}`,
+  ];
+  if (chat.type !== "private") baris.push(`Nama: ${escapeMarkdown(chat.title ?? "-")}`);
+
+  if (from) {
+    baris.push(``, `*Pemanggil*`, `User ID: \`${from.id}\``);
+    if (from.username) baris.push(`Username: @${escapeMarkdown(from.username)}`);
+  }
+
+  baris.push(``, statusPengingat(chat));
+
+  // Baris siap salin: yang dibutuhkan .env justru dua nilai di atas.
+  baris.push(
+    ``,
+    `*Untuk .env*`,
+    chat.type === "private"
+      ? "```\nADMIN_IDS=" + (from?.id ?? "<user id>") + "\n```"
+      : "```\nGROUP_ID=" + chat.id + "\nADMIN_IDS=" + (from?.id ?? "<user id>") + "\n```",
+    `Setelah diubah, restart bot agar terbaca.`
+  );
+
+  return baris.join("\n");
+}
+
+/**
+ * Composer terpisah untuk /init, sengaja dipasang **sebelum** batasiAkses di
+ * src/index.ts.
+ *
+ * Alasannya: gunanya /init justru untuk chat yang *belum* terdaftar — begitu bot
+ * ditambahkan ke grup baru, ID grupnya belum ada di GROUP_ID, sehingga gerbang
+ * akses akan mendiamkan perintah apa pun dari sana, termasuk /info. Kalau /init
+ * ikut digerbangi, ia cuma jadi duplikat /info dan tidak pernah bisa dipakai
+ * untuk hal yang membuatnya dibuat.
+ *
+ * Yang dibocorkan hanya identitas chat itu sendiri dan identitas pemanggilnya —
+ * keduanya sudah diketahui siapa pun yang ada di chat tersebut. Tidak ada data
+ * muamalah, operator, atau tautan dokumen yang bisa diambil lewat sini, dan
+ * perintah lain tetap berada di balik gerbang.
+ */
+export const initComposer = new Composer<BotContext>();
+
+initComposer.command("init", async (ctx) => {
+  if (!ctx.chat) return;
+  await ctx.reply(teksInit(ctx.chat, ctx.from), { parse_mode: "Markdown" });
+});

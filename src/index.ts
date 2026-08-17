@@ -12,7 +12,7 @@ import { muamalahComposer } from "./handlers/muamalah.js";
 import { dokumenComposer } from "./handlers/dokumen.js";
 import { operatorComposer } from "./handlers/operator.js";
 import { laporanComposer } from "./handlers/laporan.js";
-import { groupInfoComposer } from "./handlers/groupInfo.js";
+import { groupInfoComposer, initComposer } from "./handlers/groupInfo.js";
 import { tambahMuamalah } from "./conversations/tambahMuamalah.js";
 import { editMuamalahConvo } from "./conversations/editMuamalah.js";
 import { catatAngsuranConvo } from "./conversations/catatAngsuran.js";
@@ -79,6 +79,11 @@ async function main() {
 
   const bot = new Bot<BotContext>(config.botToken);
 
+  // /init sengaja di depan gerbang akses: perintah ini justru dipakai di chat
+  // yang belum terdaftar, untuk membaca Chat ID-nya. Lihat initComposer di
+  // src/handlers/groupInfo.ts untuk pertimbangan keamanannya.
+  bot.use(initComposer);
+
   // Paling awal, sebelum session/conversation dibuat, agar update dari chat
   // yang tidak diizinkan tidak menyentuh state apa pun.
   bot.use(batasiAkses);
@@ -115,6 +120,7 @@ async function main() {
 
   await bot.api.setMyCommands([
     { command: "menu", description: "Tampilkan menu utama" },
+    { command: "init", description: "Tampilkan Chat ID & User ID untuk setup" },
     { command: "info", description: "Info grup ini & status koneksi bot" },
     { command: "tambah", description: "Tambah muamalah baru (lewat menu)" },
     { command: "list", description: "Daftar muamalah" },
