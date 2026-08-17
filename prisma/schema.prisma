@@ -1,0 +1,135 @@
+generator client {
+  provider      = "prisma-client-js"
+  binaryTargets = ["native", "linux-musl-openssl-3.0.x"]
+}
+
+datasource db {
+  provider = "sqlite"
+  url      = env("DATABASE_URL")
+}
+
+// SQLite tidak mendukung enum native di Prisma; nilai dibatasi lewat TS union
+// type di src/types.ts dan divalidasi di service layer sebelum ditulis.
+
+model Operator {
+  id             Int      @id @default(autoincrement())
+  telegramUserId String   @unique
+  nama           String
+  role           String   @default("OPERATOR") // "ADMIN" | "OPERATOR"
+  aktif          Boolean  @default(true)
+  createdAt      DateTime @default(now())
+
+  muamalahDibuat Muamalah[]  @relation("DibuatOleh")
+  angsuranDicatat Angsuran[] @relation("DicatatOleh")
+  dokumenDiunggah Dokumen[]  @relation("DiunggahOleh")
+  auditLogs      AuditLog[]
+}
+
+model Pihak {
+  id             Int      @id @default(autoincrement())
+  nama           String
+  telegramUserId String?
+  kontak         String?
+  catatan        String?
+  createdAt      DateTime @default(now())
+
+  muamalah Muamalah[]
+}
+
+model Muamalah {
+  id              Int             @id @default(autoincrement())
+  jenis           String          // UTANG | PIUTANG | INVESTASI | QARDH | LAINNYA
+  pihakId         Int
+  pihak           Pihak           @relation(fields: [pihakId], references: [id])
+  judul           String
+  pokok           BigInt
+  mataUang        String          @default("IDR")
+  tanggalAkad     DateTime
+  jatuhTempo      DateTime?
+  // "Terlambat" sengaja bukan status tersimpan, melainkan turunan dari
+  // jatuhTempo < hari ini pada transaksi BERJALAN — supaya tidak ada dua sumber
+  // kebenaran yang bisa berbeda kalau jatuhTempo diedit.
+  status          String          @default("BERJALAN") // DRAFT | BERJALAN | SELESAI | BATAL
+  bagiHasilNisbah String?
+  deskripsi       String?
+
+  // Skema cicilan, hanya relevan untuk UTANG/PIUTANG/QARDH. Jadwal tidak
+  // disimpan per baris melainkan dihitung dari tiga kolom ini (lihat
+  // src/utils/cicilan.ts).
+  tenorCicilan    Int?
+  periodeCicilan  String?         // BULANAN | MINGGUAN
+  mulaiCicilan    DateTime?
+  dibuatOlehId    Int
+  dibuatOleh      Operator        @relation("DibuatOleh", fields: [dibuatOlehId], references: [id])
+  createdAt       DateTime        @default(now())
+  updatedAt       DateTime        @updatedAt
+
+  angsuran   Angsuran[]
+  dokumen    Dokumen[]
+  pengingat  Pengingat[]
+
+  @@index([status])
+  @@index([jatuhTempo])
+}
+
+model Angsuran {
+  id             Int      @id @default(autoincrement())
+  muamalahId     Int
+  muamalah       Muamalah @relation(fields: [muamalahId], references: [id])
+  jumlah         BigInt
+  tanggal        DateTime
+  buktiFileId    String?
+  dicatatOlehId  Int
+  dicatatOleh    Operator @relation("DicatatOleh", fields: [dicatatOlehId], references: [id])
+  createdAt      DateTime @default(now())
+
+  @@index([muamalahId])
+}
+
+model Dokumen {
+  id              Int          @id @default(autoincrement())
+  muamalahId      Int
+  muamalah        Muamalah     @relation(fields: [muamalahId], references: [id])
+  namaFile        String
+  mimeType        String
+  telegramFileId  String
+  pathLokal       String
+  jenis           String       @default("AKAD") // AKAD | BUKTI | LAINNYA
+  diunggahOlehId  Int
+  diunggahOleh    Operator     @relation("DiunggahOleh", fields: [diunggahOlehId], references: [id])
+  createdAt       DateTime     @default(now())
+
+  @@index([muamalahId])
+}
+
+model Template {
+  id             Int      @id @default(autoincrement())
+  kode           String   @unique
+  judul          String
+  telegramFileId String
+  pathLokal      String
+  createdAt      DateTime @default(now())
+}
+
+model AuditLog {
+  id          Int      @id @default(autoincrement())
+  operatorId  Int
+  operator    Operator @relation(fields: [operatorId], references: [id])
+  aksi        String
+  entitas     String
+  entitasId   Int
+  payloadJson String?
+  createdAt   DateTime @default(now())
+
+  @@index([entitas, entitasId])
+}
+
+model Pengingat {
+  id           Int       @id @default(autoincrement())
+  muamalahId   Int
+  muamalah     Muamalah  @relation(fields: [muamalahId], references: [id])
+  offsetHari   Int
+  terkirimPada DateTime?
+
+  @@unique([muamalahId, offsetHari])
+}
