@@ -56,6 +56,30 @@ export const LABEL_STATUS: Record<StatusMuamalah, string> = {
   BATAL: "Batal",
 };
 
+/**
+ * Sebutan kedua pihak menurut jenis akadnya. Yang berbeda bukan sekadar kata:
+ * pada qardh arah kewajiban mengalir dari pihak pertama ke kedua, sedangkan
+ * pada musyarakah keduanya setara — menampilkan "Pihak 1/Pihak 2" untuk semua
+ * akan menghapus perbedaan yang justru jadi inti dokumennya.
+ *
+ * Pihak pertama selalu yang menyerahkan (uang, barang, atau modal), pihak kedua
+ * yang menerima atau mengelola.
+ */
+export const PERAN_PIHAK: Record<JenisMuamalah, { pertama: string; kedua: string }> = {
+  UTANG: { pertama: "Pemberi pinjaman", kedua: "Penerima pinjaman" },
+  PIUTANG: { pertama: "Pemberi pinjaman", kedua: "Penerima pinjaman" },
+  QARDH: { pertama: "Pemberi pinjaman", kedua: "Penerima pinjaman" },
+  MURABAHAH: { pertama: "Penjual", kedua: "Pembeli" },
+  INVESTASI: { pertama: "Pemodal", kedua: "Pengelola" },
+  MUDHARABAH: { pertama: "Pemilik modal", kedua: "Pengelola" },
+  MUSYARAKAH: { pertama: "Mitra pertama", kedua: "Mitra kedua" },
+  LAINNYA: { pertama: "Pihak pertama", kedua: "Pihak kedua" },
+};
+
+export function peranPihak(jenis: string): { pertama: string; kedua: string } {
+  return PERAN_PIHAK[jenis as JenisMuamalah] ?? PERAN_PIHAK.LAINNYA;
+}
+
 export const LABEL_PERIODE: Record<PeriodeCicilan, string> = {
   BULANAN: "bulanan",
   MINGGUAN: "mingguan",
@@ -77,13 +101,21 @@ export function ringkasSkemaCicilan(
 }
 
 export function ringkasanMuamalah(
-  m: Muamalah & { pihak: { nama: string }; sisaSaldo?: bigint }
+  m: Muamalah & {
+    pihak: { nama: string };
+    pihakKedua?: { nama: string } | null;
+    sisaSaldo?: bigint;
+  }
 ): string {
   const labelJenis = LABEL_JENIS[m.jenis as JenisMuamalah] ?? m.jenis;
   const labelStatus = LABEL_STATUS[m.status as StatusMuamalah] ?? m.status;
+  const peran = peranPihak(m.jenis);
   const baris = [
     `#${m.id} — ${labelJenis} — ${m.judul}`,
-    `Pihak: ${m.pihak.nama}`,
+    `${peran.pertama}: ${m.pihak.nama}`,
+    // Transaksi lama bisa saja belum punya pihak kedua; barisnya dilewati
+    // ketimbang menampilkan sebutan peran dengan nama kosong.
+    ...(m.pihakKedua ? [`${peran.kedua}: ${m.pihakKedua.nama}`] : []),
     `Pokok: ${formatRupiah(m.pokok)}`,
   ];
   // Pada murabahah, angka yang ditagih adalah harga jualnya — menampilkan pokok

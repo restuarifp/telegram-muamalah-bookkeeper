@@ -6,6 +6,7 @@ import {
   nominalCicilan,
   punyaCicilan,
   sudahTerlambat,
+  totalKewajiban,
 } from "./cicilan.js";
 
 const tgl = (iso: string) => new Date(`${iso}T00:00:00.000Z`);
@@ -128,5 +129,39 @@ describe("sudahTerlambat", () => {
 
   it("false bila tidak punya jatuh tempo", () => {
     expect(sudahTerlambat({ status: "BERJALAN", jatuhTempo: null }, hariIni)).toBe(false);
+  });
+});
+
+describe("totalKewajiban", () => {
+  it("sama dengan pokok bila tidak ada margin", () => {
+    expect(totalKewajiban({ pokok: 5_000_000n })).toBe(5_000_000n);
+    expect(totalKewajiban({ pokok: 5_000_000n, margin: null })).toBe(5_000_000n);
+  });
+
+  it("menambahkan margin pada akad murabahah", () => {
+    expect(totalKewajiban({ pokok: 10_000_000n, margin: 2_000_000n })).toBe(12_000_000n);
+  });
+});
+
+describe("jadwal cicilan murabahah", () => {
+  const akad = {
+    pokok: 10_000_000n,
+    margin: 2_000_000n,
+    tenorCicilan: 12,
+    periodeCicilan: "BULANAN",
+    mulaiCicilan: tgl("2026-09-01"),
+  };
+
+  it("membagi harga jual, bukan harga pokok", () => {
+    const jadwal = jadwalCicilan(akad);
+    // 12jt / 12 = 1jt sebulan; kalau yang dibagi pokoknya, angkanya jadi 833.333
+    // dan operator menagih kurang tiap bulan selama setahun.
+    expect(jadwal[0].jumlah).toBe(1_000_000n);
+    expect(jadwal.reduce((t, b) => t + b.jumlah, 0n)).toBe(12_000_000n);
+  });
+
+  it("belum menutup cicilan terakhir saat baru sebesar pokok yang dibayar", () => {
+    expect(cicilanTerbayar(jadwalCicilan(akad), 10_000_000n)).toBe(10);
+    expect(cicilanBerikutnya(akad, 10_000_000n)?.urutan).toBe(11);
   });
 });

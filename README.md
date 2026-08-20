@@ -5,9 +5,9 @@ Sistem manajemen dan pencatatan muamalah non-tunai (utang-piutang, investasi, qa
 ## Fitur
 
 - **CRUD & daftar muamalah** — wizard inline keyboard (`/tambah`, `/list`, `/filter`), edit field, catat angsuran, tandai selesai, hapus (soft delete; hard delete khusus superadmin lewat `/hapus_permanen`).
-- **Jenis yang dibuka: Qardh saja** (untuk sekarang) — diatur lewat `JENIS_AKTIF` di `src/types.ts`. Karena tinggal satu pilihan, wizard `/tambah` melewati langkah pemilihan jenis. `JENIS_MUAMALAH` sengaja tetap berisi semua jenis yang dikenali sistem, jadi transaksi lama berjenis lain tetap tampil dengan label yang benar, ikut terhitung di rekap, dan tetap punya folder Nextcloud sendiri. Membuka jenis lain cukup dengan menambahkannya di `JENIS_AKTIF`.
+- **Jenis yang dibuka: Qardh, Murabahah, Mudharabah, Musyarakah** — diatur lewat `JENIS_AKTIF` di `src/types.ts` (lihat [Jenis akad](#jenis-akad)). `JENIS_MUAMALAH` sengaja tetap berisi semua jenis yang dikenali sistem, jadi transaksi lama berjenis lain tetap tampil dengan label yang benar, ikut terhitung di rekap, dan tetap punya folder Nextcloud sendiri. Membuka jenis lain cukup dengan menambahkannya di `JENIS_AKTIF`.
 - **Status transaksi** — `DRAFT` → `BERJALAN` → `SELESAI`, atau `BATAL`. Transaksi bisa disimpan sebagai draft dari langkah konfirmasi wizard; draft tidak dihitung di rekap dan tidak memicu pengingat sampai diaktifkan lewat tombol "Jadikan Berjalan". **Keterlambatan bukan status**: dihitung saat ditampilkan dari `jatuhTempo` pada transaksi `BERJALAN`, sehingga mengubah jatuh tempo langsung tercermin tanpa job pembetulan.
-- **Skema cicilan** — untuk utang/piutang/qardh, disimpan parametrik (jumlah cicilan, periode bulanan/mingguan, tanggal cicilan pertama). Jadwal, nominal per cicilan, dan cicilan berikutnya dihitung dari ketiga kolom itu di `src/utils/cicilan.ts` — sisa pembagian ditumpuk ke cicilan terakhir agar totalnya persis sama dengan pokok.
+- **Skema cicilan** — untuk utang/piutang/qardh/murabahah, disimpan parametrik (jumlah cicilan, periode bulanan/mingguan, tanggal cicilan pertama). Jadwal, nominal per cicilan, dan cicilan berikutnya dihitung dari ketiga kolom itu di `src/utils/cicilan.ts` — sisa pembagian ditumpuk ke cicilan terakhir agar totalnya persis sama dengan nilai akad (pokok, atau pokok + margin pada murabahah).
 - **Notifikasi jatuh tempo** — pengingat otomatis harian jam 08:00 WIB (H-7, H-3, H-1, H-0, dan terlambat mingguan) dikirim ke grup (atau ke chat pribadi admin bila `GROUP_ID` kosong); `/jatuhtempo` untuk cek manual kapan saja. Transaksi bercicilan diingatkan **per cicilan**, bukan per transaksi:
   - Cicilan yang sudah tertutup pembayaran berhenti diingatkan dengan sendirinya — tidak ada penandaan manual.
   - Tunggakan digabung jadi satu pesan per transaksi ("3 cicilan tertunggak (ke-1 s/d ke-3) — total Rp …"), supaya enam cicilan telat tidak jadi enam pesan.
@@ -17,6 +17,47 @@ Sistem manajemen dan pencatatan muamalah non-tunai (utang-piutang, investasi, qa
 - **Rekap** (`/rekap`) dan **manajemen operator & kantor** (`/operator_*`, `/kantor_*`) dengan audit log di setiap mutasi.
 - **ACL per kantor perwakilan** — tiap operator melekat pada satu kantor dan hanya melihat transaksi kantornya; superadmin melihat semuanya (lihat [Kantor & hak akses](#kantor--hak-akses)).
 - **Web UI** — dasbor, tabel transaksi yang bisa disaring, formulir penuh untuk mencatat & mengubah, plus pengelolaan dokumen, template, kantor, dan operator. **Login lewat OTP Telegram**, tanpa password (lihat [Web UI](#web-ui)).
+
+## Jenis akad
+
+Yang membedakan jenis bukan cuma labelnya, melainkan **field mana yang berlaku** dan **berapa yang sebenarnya ditagih**. Ketiganya didaftarkan sekali di `src/types.ts` (`JENIS_BERMARGIN`, `JENIS_BAGI_HASIL`, `JENIS_BERPORSI_MODAL`, `JENIS_BERCICILAN`), lalu wizard bot, formulir web, dan tampilan detail menyusun dirinya dari situ — tidak ada `jenis === "..."` yang berserak di banyak berkas.
+
+| Jenis | Pihak pertama → kedua | Pokok | Margin | Nisbah | Porsi modal | Cicilan |
+| --- | --- | --- | --- | --- | --- | --- |
+| **Qardh** (utang, piutang) | pemberi → penerima pinjaman | jumlah pinjaman | — | — | — | ya |
+| **Murabahah** (jual beli) | penjual → pembeli | harga pokok barang | ✅ wajib diisi | — | — | ya |
+| **Mudharabah** (bagi hasil) | pemilik modal → pengelola | modal yang disetor | — | ✅ | — | tidak |
+| **Musyarakah** (kongsi) | mitra pertama → mitra kedua | modal yang dicatat | — | ✅ | ✅ | tidak |
+
+### Dua pihak per transaksi
+
+Setiap akad melibatkan **dua pihak**, dan sebutan keduanya mengikuti jenisnya — bukan sekadar "Pihak 1" dan "Pihak 2". Daftarnya ada di `PERAN_PIHAK` (`src/utils/format.ts`), dan formulir web mengirim sebutan itu sebagai atribut `data-` pada tiap opsi jenis, sehingga label kolomnya berubah begitu jenis diganti tanpa perlu menyalin daftar peran ke JavaScript.
+
+Urutannya punya arti: **pihak pertama selalu yang menyerahkan** (uang, barang, atau modal), pihak kedua yang menerima atau mengelola. Satu orang tidak boleh mengisi kedua sisi — ditolak baik di wizard bot maupun di formulir web.
+
+`pihakKeduaId` nullable di database bukan karena boleh kosong, melainkan karena transaksi yang tercatat sebelum kolom ini ada memang hanya punya satu pihak (migrasi `20260820143535_dua_pihak` tidak mengarang data). Konsekuensinya di antarmuka:
+
+- **Mencatat baru** — kedua pihak wajib diisi.
+- **Menyunting** — pihak kedua boleh dikosongkan, supaya transaksi lama bisa diperbaiki bagian lainnya tanpa memaksa operator mengarang nama. Halaman ubah di web sekaligus jadi tempat melengkapinya.
+- **Menampilkan** — baris pihak kedua dilewati kalau memang belum ada, bukan ditampilkan sebagai peran dengan nama kosong.
+
+Pencarian di `/muamalah` mencocokkan nama **kedua** pihak, jadi transaksi tetap ketemu dari sisi mana pun operator mengingatnya.
+
+### Murabahah: yang ditagih adalah harga jual, bukan pokok
+
+Ini satu-satunya jenis yang memisahkan "nilai barang" dari "nilai kewajiban":
+
+```
+harga jual (total kewajiban) = pokok + margin
+```
+
+Seluruh angka turunan — jadwal cicilan, nominal per cicilan, sisa saldo, rekap, pengingat jatuh tempo, dan penandaan otomatis SELESAI — dihitung dari **`totalKewajiban()`** di `src/utils/cicilan.ts`, bukan dari `pokok`. Konsekuensinya yang mudah diperiksa: pembeli yang sudah menyetor persis sebesar harga pokok **belum** dianggap lunas, dan cicilan 12x atas pokok 10 juta + margin 2 juta adalah Rp 1.000.000/bulan (bukan Rp 833.333).
+
+Aturan itu dijaga tipe, bukan disiplin: `hitungSisaSaldo()` menerima akadnya utuh, bukan angka pokok, sehingga pemanggil baru tidak bisa diam-diam lupa mengikutkan margin — TypeScript menolaknya lebih dulu.
+
+Akad bagi hasil (mudharabah & musyarakah) sengaja **tidak** punya skema cicilan: yang mengalir ke sana bagian keuntungan yang belum tentu besarnya, bukan angsuran berjadwal. Pembayaran yang masuk tetap dicatat sebagai angsuran dan mengurangi sisa modal, sama seperti Investasi selama ini.
+
+Migrasi `20260820132638_akad_syariah` hanya menambah dua kolom opsional (`margin`, `porsiModal`); transaksi lama tidak disentuh dan tetap berperilaku sama karena `margin` NULL berarti kewajiban = pokok.
 
 ## Dokumen & template (Nextcloud)
 
@@ -33,6 +74,7 @@ NEXTCLOUD_BASE_DIR/                       (default: /Documents/Akad Muamalah)
 ├── Qardh/
 │   └── 12-pinjaman-fulan/                <id transaksi>-<slug judul>
 │       └── Akad Qardh.pdf
+├── Murabahah/ · Mudharabah/ · Musyarakah/
 ├── Investasi/ · Utang/ · Piutang/ · Lainnya/
 ```
 
@@ -160,7 +202,7 @@ Pengiriman kode memakai `Api` grammY sendiri, bukan instance bot yang sedang pol
 | --- | --- |
 | `/` | Dasbor: saldo berjalan, jumlah transaksi aktif, jatuh tempo bulan ini, tabel jatuh tempo 7 hari ke depan + tunggakan, sisa per jenis |
 | `/muamalah` | Daftar transaksi: cari judul/nama pihak, saring jenis & status, paginasi, sisa saldo per baris |
-| `/muamalah/baru` | Formulir lengkap dalam satu halaman (termasuk skema cicilan); bisa disimpan sebagai draft |
+| `/muamalah/baru` | Formulir lengkap dalam satu halaman; bidangnya menyesuaikan jenis akad (margin untuk murabahah, nisbah & porsi modal untuk bagi hasil, cicilan hanya bagi yang boleh) dan bisa disimpan sebagai draft |
 | `/muamalah/:id` | Detail: rincian, **jadwal cicilan** lengkap dengan penanda tertutup/tertunggak, riwayat angsuran + form catat angsuran, dokumen, tombol jadikan berjalan / tandai selesai / batalkan |
 | `/muamalah/:id/ubah` | Ubah semua field yang boleh diedit sekaligus (jenis & pihak tidak bisa diubah, sama seperti di bot) |
 | `/template` | Daftar template akad; superadmin bisa mendaftarkan dari tautan, ubah judul, lepas, dan sinkron |

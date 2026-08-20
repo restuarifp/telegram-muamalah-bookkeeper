@@ -94,14 +94,25 @@ model Pihak {
   catatan        String?
   createdAt      DateTime @default(now())
 
-  muamalah Muamalah[]
+  // Dua relasi terpisah karena satu orang bisa jadi pihak pertama di satu akad
+  // dan pihak kedua di akad lain.
+  muamalahSebagaiPertama Muamalah[] @relation("PihakPertama")
+  muamalahSebagaiKedua   Muamalah[] @relation("PihakKedua")
 }
 
 model Muamalah {
   id              Int             @id @default(autoincrement())
-  jenis           String          // UTANG | PIUTANG | INVESTASI | QARDH | LAINNYA
+  jenis           String          // lihat JENIS_MUAMALAH di src/types.ts
+  // Setiap akad melibatkan dua pihak, dan peran keduanya ditentukan jenisnya
+  // (pemberi/penerima pinjaman, penjual/pembeli, pemodal/pengelola, dst —
+  // lihat PERAN_PIHAK di src/utils/format.ts).
   pihakId         Int
-  pihak           Pihak           @relation(fields: [pihakId], references: [id])
+  pihak           Pihak           @relation("PihakPertama", fields: [pihakId], references: [id])
+  // Opsional di database, bukan karena boleh kosong, melainkan karena transaksi
+  // yang tercatat sebelum kolom ini ada memang cuma punya satu pihak. Formulir
+  // pencatatan baru mewajibkannya.
+  pihakKeduaId    Int?
+  pihakKedua      Pihak?          @relation("PihakKedua", fields: [pihakKeduaId], references: [id])
   judul           String
   pokok           BigInt
   mataUang        String          @default("IDR")
@@ -123,7 +134,7 @@ model Muamalah {
   porsiModal      String?
   deskripsi       String?
 
-  // Skema cicilan, hanya relevan untuk UTANG/PIUTANG/QARDH. Jadwal tidak
+  // Skema cicilan, hanya relevan untuk jenis di JENIS_BERCICILAN. Jadwal tidak
   // disimpan per baris melainkan dihitung dari tiga kolom ini (lihat
   // src/utils/cicilan.ts).
   tenorCicilan    Int?

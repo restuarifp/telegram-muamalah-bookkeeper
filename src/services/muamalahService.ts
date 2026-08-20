@@ -6,6 +6,7 @@ import { totalKewajiban } from "../utils/cicilan.js";
 export interface BuatMuamalahInput {
   jenis: JenisMuamalah;
   pihakId: number;
+  pihakKeduaId?: number | null;
   judul: string;
   pokok: bigint;
   tanggalAkad: Date;
@@ -46,6 +47,7 @@ export async function daftarMuamalah(opts: {
           OR: [
             { judul: { contains: opts.cari } },
             { pihak: { nama: { contains: opts.cari } } },
+            { pihakKedua: { nama: { contains: opts.cari } } },
           ],
         }
       : {}),
@@ -53,7 +55,7 @@ export async function daftarMuamalah(opts: {
   const [items, total] = await Promise.all([
     prisma.muamalah.findMany({
       where,
-      include: { pihak: true, kantor: true },
+      include: { pihak: true, pihakKedua: true, kantor: true },
       orderBy: [{ jatuhTempo: "asc" }, { createdAt: "desc" }],
       skip: opts.skip ?? 0,
       take: opts.take ?? 5,
@@ -68,6 +70,7 @@ export async function detailMuamalah(id: number) {
     where: { id },
     include: {
       pihak: true,
+      pihakKedua: true,
       angsuran: { orderBy: { tanggal: "asc" }, include: { dicatatOleh: true } },
       dokumen: { orderBy: { createdAt: "desc" } },
       dibuatOleh: true,
@@ -123,6 +126,8 @@ export async function editMuamalahField(
  */
 export type UbahMuamalahInput = Pick<
   BuatMuamalahInput,
+  | "pihakId"
+  | "pihakKeduaId"
   | "judul"
   | "pokok"
   | "tanggalAkad"
@@ -190,6 +195,16 @@ export async function cariPihak(nama: string) {
 
 export async function buatPihak(nama: string, telegramUserId?: string | null) {
   return prisma.pihak.create({ data: { nama, telegramUserId } });
+}
+
+/**
+ * Mencari pihak bernama persis sama, atau membuatnya bila belum ada. Dipakai
+ * formulir web yang menerima nama sebagai teks bebas — tanpa pencocokan ini,
+ * mencatat transaksi kedua untuk orang yang sama akan melahirkan pihak kembar.
+ */
+export async function pihakDariNama(nama: string) {
+  const ada = await prisma.pihak.findFirst({ where: { nama } });
+  return ada ?? buatPihak(nama);
 }
 
 export async function rekapRingkasan(kantorId?: number) {

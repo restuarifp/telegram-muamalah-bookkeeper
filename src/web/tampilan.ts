@@ -1,4 +1,4 @@
-import { gabung, html, type HtmlAman } from "./html.js";
+import { gabung, html, mentah, type HtmlAman } from "./html.js";
 
 /**
  * Nilai untuk `<input type="date">`. Tanggal disimpan sebagai tengah malam UTC
@@ -13,14 +13,23 @@ export function nilaiTanggal(d: Date | null | undefined): string {
 export interface Opsi {
   nilai: string;
   label: string;
+  /**
+   * Atribut data- tambahan pada <option>. Dipakai untuk menitipkan keterangan
+   * yang hanya diketahui server (mis. sebutan peran pihak per jenis akad) ke
+   * skrip klien — supaya daftarnya tidak perlu ditulis ulang di JavaScript dan
+   * jadi sumber kebenaran kedua yang bisa berbeda.
+   */
+  data?: Record<string, string>;
 }
 
 export function opsiPilihan(opsi: Opsi[], terpilih?: string | null): HtmlAman {
   return gabung(
-    opsi.map(
-      (o) =>
-        html`<option value="${o.nilai}" ${o.nilai === (terpilih ?? "") ? html`selected` : null}>${o.label}</option>`
-    )
+    opsi.map((o) => {
+      const data = gabung(
+        Object.entries(o.data ?? {}).map(([k, v]) => html` data-${mentah(k)}="${v}"`)
+      );
+      return html`<option value="${o.nilai}"${data} ${o.nilai === (terpilih ?? "") ? html`selected` : null}>${o.label}</option>`;
+    })
   );
 }
 

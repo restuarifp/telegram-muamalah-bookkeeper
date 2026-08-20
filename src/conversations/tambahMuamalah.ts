@@ -11,7 +11,13 @@ import {
   type PeriodeCicilan,
   type StatusMuamalah,
 } from "../types.js";
-import { LABEL_JENIS, formatRupiah, formatTanggal, ringkasSkemaCicilan } from "../utils/format.js";
+import {
+  LABEL_JENIS,
+  formatRupiah,
+  formatTanggal,
+  peranPihak,
+  ringkasSkemaCicilan,
+} from "../utils/format.js";
 import { totalKewajiban } from "../utils/cicilan.js";
 import { parseNominal, parseTanggal, parseTenor } from "../utils/validate.js";
 import { cariPihak, buatPihak, buatMuamalah } from "../services/muamalahService.js";
@@ -122,33 +128,60 @@ export async function tambahMuamalah(conversation: Convo, ctx: BotContext) {
     jenis = jenisPilihan as JenisMuamalah;
   }
 
-  // 2. Pihak
-  const namaPihak = await tanyaTeks(conversation, ctx, "Siapa nama pihak (mitra) transaksi ini?");
-  if (namaPihak === null) return batal(ctx);
-  if (!namaPihak) return batal(ctx);
+  // 2. Kedua pihak akad. Sebutan perannya mengikuti jenis (pemberi/penerima,
+  // penjual/pembeli, pemodal/pengelola) supaya operator tidak perlu menebak
+  // siapa yang harus diisi lebih dulu.
+  const peran = peranPihak(jenis);
 
-  const kandidat = await conversation.external(() => cariPihak(namaPihak));
-  let pihakId: number;
-  if (kandidat.length > 0) {
+  /** Satu langkah tanya-nama + pilih-yang-sudah-ada, dipakai untuk dua pihak. */
+  async function tanyaPihak(label: string): Promise<{ id: number; nama: string } | null> {
+    const nama = await tanyaTeks(conversation, ctx, `Siapa ${label.toLowerCase()}nya?`);
+    if (nama === null || !nama) return null;
+
+    const kandidat = await conversation.external(() => cariPihak(nama));
+    if (kandidat.length === 0) {
+      const pihakBaru = await conversation.external(() => buatPihak(nama));
+      return { id: pihakBaru.id, nama: pihakBaru.nama };
+    }
+
     const kb = new InlineKeyboard();
     for (const p of kandidat) kb.text(p.nama, `wizard:pihak:${p.id}`).row();
-    kb.text(`➕ Buat baru: "${namaPihak}"`, "wizard:pihak:baru").row();
+    kb.text(`➕ Buat baru: "${nama}"`, "wizard:pihak:baru").row();
     kb.text(BATAL, "wizard:batal");
-    await ctx.reply("Pilih pihak yang sudah ada, atau buat baru:", { reply_markup: kb });
+    await ctx.reply(`Pilih ${label.toLowerCase()} yang sudah ada, atau buat baru:`, {
+      reply_markup: kb,
+    });
     const next = await conversation.waitFor("callback_query:data");
     await next.answerCallbackQuery();
     const data = next.callbackQuery.data;
-    if (data === "wizard:batal") return batal(ctx);
+    if (data === "wizard:batal") return null;
     if (data === "wizard:pihak:baru") {
-      const pihakBaru = await conversation.external(() => buatPihak(namaPihak));
-      pihakId = pihakBaru.id;
-    } else {
-      pihakId = Number(data.replace("wizard:pihak:", ""));
+      const pihakBaru = await conversation.external(() => buatPihak(nama));
+      return { id: pihakBaru.id, nama: pihakBaru.nama };
     }
-  } else {
-    const pihakBaru = await conversation.external(() => buatPihak(namaPihak));
-    pihakId = pihakBaru.id;
+    const dipilih = kandidat.find((p) => `${p.id}` === data.replace("wizard:pihak:", ""));
+    return dipilih ? { id: dipilih.id, nama: dipilih.nama } : null;
   }
+
+  const pihakPertama = await tanyaPihak(peran.pertama);
+  if (!pihakPertama) return batal(ctx);
+
+  let pihakKedua: { id: number; nama: string } | null = null;
+  while (pihakKedua === null) {
+    pihakKedua = await tanyaPihak(peran.kedua);
+    if (!pihakKedua) return batal(ctx);
+    // Satu orang tidak bisa berakad dengan dirinya sendiri; kalau dibiarkan,
+    // dokumen akadnya menyebut nama yang sama di kedua sisi.
+    if (pihakKedua.id === pihakPertama.id) {
+      await ctx.reply(
+        `⚠️ ${peran.pertama} dan ${peran.kedua.toLowerCase()} tidak boleh orang yang sama. Coba lagi.`
+      );
+      pihakKedua = null;
+    }
+  }
+
+  const pihakId = pihakPertama.id;
+  const namaPihak = pihakPertama.nama;
 
   // 3. Judul
   const judul = await tanyaTeks(conversation, ctx, "Judul/deskripsi singkat transaksi ini?");
@@ -323,7 +356,8 @@ export async function tambahMuamalah(conversation: Convo, ctx: BotContext) {
     `Konfirmasi data berikut:\n\n` +
     `Kantor: ${namaKantor}\n` +
     `Jenis: ${LABEL_JENIS[jenis]}\n` +
-    `Pihak: ${namaPihak}\n` +
+    `${peran.pertama}: ${namaPihak}\n` +
+    `${peran.kedua}: ${pihakKedua.nama}\n` +
     `Judul: ${judul}\n` +
     `Pokok: ${formatRupiah(pokok)}\n` +
     (margin
@@ -353,6 +387,7 @@ export async function tambahMuamalah(conversation: Convo, ctx: BotContext) {
     buatMuamalah({
       jenis,
       pihakId,
+      pihakKeduaId: pihakKedua.id,
       judul,
       pokok: pokok!,
       tanggalAkad: tanggalAkad!,

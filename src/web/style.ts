@@ -54,6 +54,10 @@ export const CSS = `
 
 * { box-sizing: border-box; }
 
+/* Dipakai skrip untuk menyembunyikan bagian formulir yang tak berlaku bagi jenis
+   akad terpilih; !important supaya tidak kalah oleh display milik komponennya. */
+[hidden] { display: none !important; }
+
 body {
   margin: 0;
   background: var(--bg);

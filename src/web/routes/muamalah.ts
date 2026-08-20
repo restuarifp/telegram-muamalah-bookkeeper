@@ -2,13 +2,13 @@ import { Hono } from "hono";
 import { prisma } from "../../db.js";
 import {
   buatMuamalah,
-  buatPihak,
   catatAngsuran,
   daftarMuamalah,
   detailMuamalah,
   hapusMuamalah,
   hitungSisaSaldo,
   perbaruiMuamalah,
+  pihakDariNama,
   ubahStatus,
 } from "../../services/muamalahService.js";
 import { daftarKantor } from "../../services/kantorService.js";
@@ -39,6 +39,7 @@ import {
   LABEL_STATUS,
   formatRupiah,
   formatTanggal,
+  peranPihak,
   ringkasSkemaCicilan,
 } from "../../utils/format.js";
 import {
@@ -161,7 +162,7 @@ rutMuamalah.get("/muamalah", async (c) => {
   <td><a href="/muamalah/${m.id}">#${m.id}</a></td>
   <td>
     <a href="/muamalah/${m.id}"><strong>${m.judul}</strong></a><br>
-    <span class="keterangan">${m.pihak.nama}${isSuperadmin(sesi.operator) ? ` · ${m.kantor.nama}` : ""}</span>
+    <span class="keterangan">${m.pihak.nama}${m.pihakKedua ? ` → ${m.pihakKedua.nama}` : ""}${isSuperadmin(sesi.operator) ? ` · ${m.kantor.nama}` : ""}</span>
   </td>
   <td>${LABEL_JENIS[m.jenis as JenisMuamalah] ?? m.jenis}</td>
   <td class="angka-kolom">${formatRupiah(totalKewajiban(m))}</td>
@@ -267,6 +268,7 @@ function formulirTransaksi(opts: {
   nilai: {
     jenis?: string;
     pihak?: string;
+    pihakKedua?: string;
     judul?: string;
     pokok?: string;
     tanggalAkad?: string;
@@ -298,6 +300,9 @@ function formulirTransaksi(opts: {
     tampil: kunci ? jenis.includes(kunci) : true,
     attr: kunci ? KOSONG : html` data-jenis="${jenis.join(" ")}"`,
   });
+  // Formulir tambah dimulai dari jenis pertama yang aktif; skrip menyesuaikan
+  // labelnya begitu operator mengganti pilihan.
+  const peran = peranPihak(kunci ?? n.jenis ?? JENIS_AKTIF[0]);
   const bidangMargin = untuk(JENIS_BERMARGIN);
   const bidangNisbah = untuk(JENIS_BAGI_HASIL);
   const bidangPorsi = untuk(JENIS_BERPORSI_MODAL);
@@ -322,23 +327,33 @@ function formulirTransaksi(opts: {
     }
     ${
       opts.baru
-        ? html`<div class="bidang-baris">
-      <div class="bidang">
-        <label for="jenis">Jenis</label>
-        <select id="jenis" name="jenis" required>
-          ${opsiPilihan(
-            JENIS_AKTIF.map((j) => ({ nilai: j, label: LABEL_JENIS[j] })),
-            n.jenis ?? JENIS_AKTIF[0]
-          )}
-        </select>
-      </div>
-      <div class="bidang">
-        <label for="pihak">Pihak <span class="petunjuk">nama mitra transaksi</span></label>
-        <input type="text" id="pihak" name="pihak" value="${n.pihak ?? ""}" required>
-      </div>
+        ? html`<div class="bidang">
+      <label for="jenis">Jenis</label>
+      <select id="jenis" name="jenis" required>
+        ${opsiPilihan(
+          // Sebutan peran dititipkan ke tiap opsi supaya label kedua kolom pihak
+          // ikut berubah saat jenis diganti, tanpa menyalin daftar peran ke JS.
+          JENIS_AKTIF.map((j) => ({
+            nilai: j,
+            label: LABEL_JENIS[j],
+            data: { "peran-pertama": peranPihak(j).pertama, "peran-kedua": peranPihak(j).kedua },
+          })),
+          n.jenis ?? JENIS_AKTIF[0]
+        )}
+      </select>
     </div>`
         : null
     }
+    <div class="bidang-baris">
+      <div class="bidang">
+        <label for="pihak" id="label-pihak">${peran.pertama}</label>
+        <input type="text" id="pihak" name="pihak" value="${n.pihak ?? ""}" required>
+      </div>
+      <div class="bidang">
+        <label for="pihakKedua" id="label-pihak-kedua">${peran.kedua}${opts.baru ? KOSONG : html` <span class="petunjuk">kosongkan bila belum diketahui</span>`}</label>
+        <input type="text" id="pihakKedua" name="pihakKedua" value="${n.pihakKedua ?? ""}"${opts.baru ? html` required` : KOSONG}>
+      </div>
+    </div>
     <div class="bidang">
       <label for="judul">Judul</label>
       <input type="text" id="judul" name="judul" value="${n.judul ?? ""}" required>
@@ -496,13 +511,17 @@ rutMuamalah.post("/muamalah/baru", async (c) => {
     return kembali(c, "/muamalah/baru", { jenis: "galat", teks: "Jenis muamalah tidak dibuka." });
   }
 
-  const namaPihak = teks(body, "pihak");
   const judul = teks(body, "judul");
   const pokok = parseNominal(teks(body, "pokok"));
   const tanggalAkad = parseTanggal(teks(body, "tanggalAkad"));
 
-  if (!namaPihak || !judul) {
-    return kembali(c, "/muamalah/baru", { jenis: "galat", teks: "Pihak dan judul wajib diisi." });
+  if (!judul) {
+    return kembali(c, "/muamalah/baru", { jenis: "galat", teks: "Judul wajib diisi." });
+  }
+
+  const pihak = await bacaPihak(body, { wajibKedua: true, peran: peranPihak(jenis) });
+  if ("galat" in pihak) {
+    return kembali(c, "/muamalah/baru", { jenis: "galat", teks: pihak.galat });
   }
   if (pokok === null) {
     return kembali(c, "/muamalah/baru", {
@@ -524,15 +543,10 @@ rutMuamalah.post("/muamalah/baru", async (c) => {
     return kembali(c, "/muamalah/baru", { jenis: "galat", teks: ketentuan.galat });
   }
 
-  // Nama pihak dicocokkan persis lebih dulu supaya mencatat transaksi kedua
-  // untuk orang yang sama tidak melahirkan pihak kembar.
-  const pihakAda = await prisma.pihak.findFirst({ where: { nama: namaPihak } });
-  const pihak = pihakAda ?? (await buatPihak(namaPihak));
-
   const status: StatusMuamalah = teks(body, "simpan") === "draft" ? "DRAFT" : "BERJALAN";
   const hasil = await buatMuamalah({
     jenis,
-    pihakId: pihak.id,
+    ...pihak,
     judul,
     pokok,
     tanggalAkad,
@@ -560,6 +574,35 @@ rutMuamalah.post("/muamalah/baru", async (c) => {
         : `Transaksi #${hasil.id} tersimpan.`,
   });
 });
+
+/**
+ * Menerjemahkan dua nama pihak jadi id, membuat pihak baru bila belum terdaftar.
+ *
+ * Pihak kedua boleh kosong **hanya** saat menyunting: transaksi yang tercatat
+ * sebelum kolom ini ada tidak punya pihak kedua, dan memaksa mengisinya berarti
+ * mendorong operator mengarang nama demi bisa menyimpan perubahan lain.
+ */
+async function bacaPihak(
+  body: Formulir,
+  opts: { wajibKedua: boolean; peran: { pertama: string; kedua: string } }
+): Promise<{ pihakId: number; pihakKeduaId: number | null } | { galat: string }> {
+  const nama = teks(body, "pihak");
+  const namaKedua = teks(body, "pihakKedua");
+  if (!nama) return { galat: `${opts.peran.pertama} wajib diisi.` };
+  if (!namaKedua && opts.wajibKedua) return { galat: `${opts.peran.kedua} wajib diisi.` };
+
+  // Dicek dari namanya lebih dulu supaya tidak sempat membuat baris pihak baru
+  // untuk akad yang toh akan ditolak.
+  if (namaKedua && nama.toLowerCase() === namaKedua.toLowerCase()) {
+    return {
+      galat: `${opts.peran.pertama} dan ${opts.peran.kedua.toLowerCase()} tidak boleh orang yang sama.`,
+    };
+  }
+
+  const pertama = await pihakDariNama(nama);
+  const kedua = namaKedua ? await pihakDariNama(namaKedua) : null;
+  return { pihakId: pertama.id, pihakKeduaId: kedua?.id ?? null };
+}
 
 /**
  * Membaca field yang hanya berlaku untuk sebagian jenis. Nilai yang dikirim
@@ -629,16 +672,26 @@ function kartuRincian(m: Transaksi): HtmlAman {
   const skema = ringkasSkemaCicilan(m);
   const rincian: { label: string; nilai: HtmlAman | string }[] = [
     { label: "Jenis", nilai: LABEL_JENIS[m.jenis as JenisMuamalah] ?? m.jenis },
-    { label: "Pihak", nilai: m.pihak.nama },
+    { label: peranPihak(m.jenis).pertama, nilai: m.pihak.nama },
+    ...(m.pihakKedua
+      ? [{ label: peranPihak(m.jenis).kedua, nilai: m.pihakKedua.nama }]
+      : []),
     { label: "Kantor", nilai: m.kantor.nama },
     { label: "Pokok", nilai: formatRupiah(m.pokok) },
-    { label: "Sisa", nilai: formatRupiah(m.sisaSaldo) },
-    { label: "Tanggal akad", nilai: formatTanggal(m.tanggalAkad) },
-    { label: "Jatuh tempo", nilai: formatTanggal(m.jatuhTempo) },
-    { label: "Status", nilai: lencanaStatus(m.status, sudahTerlambat(m)) },
   ];
+  // Angka uang dijaga berurutan: pokok → margin → harga jual → sisa. Menyelipkan
+  // margin sesudah tanggal/status membuat sisa terbaca lepas dari asalnya.
+  if (m.margin) {
+    rincian.push({ label: "Margin", nilai: formatRupiah(m.margin) });
+    rincian.push({ label: "Harga jual", nilai: formatRupiah(totalKewajiban(m)) });
+  }
+  rincian.push({ label: "Sisa", nilai: formatRupiah(m.sisaSaldo) });
+  rincian.push({ label: "Tanggal akad", nilai: formatTanggal(m.tanggalAkad) });
+  rincian.push({ label: "Jatuh tempo", nilai: formatTanggal(m.jatuhTempo) });
+  rincian.push({ label: "Status", nilai: lencanaStatus(m.status, sudahTerlambat(m)) });
   if (skema) rincian.push({ label: "Cicilan", nilai: skema });
   if (m.bagiHasilNisbah) rincian.push({ label: "Nisbah", nilai: m.bagiHasilNisbah });
+  if (m.porsiModal) rincian.push({ label: "Porsi modal", nilai: m.porsiModal });
   rincian.push({ label: "Dicatat oleh", nilai: m.dibuatOleh.nama });
 
   return html`<div class="kartu">
@@ -654,7 +707,7 @@ function kartuRincian(m: Transaksi): HtmlAman {
 function kartuJadwal(m: Transaksi): HtmlAman | null {
   if (!punyaCicilan(m)) return null;
   const jadwal = jadwalCicilan(m);
-  const dibayar = m.pokok - m.sisaSaldo;
+  const dibayar = totalKewajiban(m) - m.sisaSaldo;
   const lunas = cicilanTerbayar(jadwal, dibayar);
 
   const baris = jadwal.map(
@@ -692,7 +745,7 @@ function kartuAngsuran(m: Transaksi, sesi: SesiAktif): HtmlAman {
   );
 
   return html`<div class="kartu">
-  <h2>Angsuran <span class="keterangan">— total dibayar ${formatRupiah(m.pokok - m.sisaSaldo)}</span></h2>
+  <h2>Angsuran <span class="keterangan">— total dibayar ${formatRupiah(totalKewajiban(m) - m.sisaSaldo)}</span></h2>
   ${
     m.angsuran.length === 0
       ? html`<p class="kosong">Belum ada angsuran tercatat.</p>`
@@ -757,7 +810,7 @@ rutMuamalah.get("/muamalah/:id", async (c) => {
       pesan: ambilPesan(c),
       isi: html`${judulHalaman(
         `#${m.id} ${m.judul}`,
-        `${LABEL_JENIS[m.jenis as JenisMuamalah] ?? m.jenis} · ${m.pihak.nama} · ${m.kantor.nama}`,
+        `${LABEL_JENIS[m.jenis as JenisMuamalah] ?? m.jenis} · ${m.pihak.nama}${m.pihakKedua ? ` → ${m.pihakKedua.nama}` : ""} · ${m.kantor.nama}`,
         tombolAksi(m, sesi)
       )}
 ${kartuRincian(m)}
@@ -795,6 +848,8 @@ rutMuamalah.get("/muamalah/:id/ubah", async (c) => {
     jenisTerkunci: m.jenis,
     labelTombol: "Simpan perubahan",
     nilai: {
+      pihak: m.pihak.nama,
+      pihakKedua: m.pihakKedua?.nama ?? "",
       judul: m.judul,
       pokok: m.pokok.toString(),
       margin: m.margin ? m.margin.toString() : "",
@@ -838,7 +893,11 @@ rutMuamalah.post("/muamalah/:id/ubah", async (c) => {
   const ketentuan = bacaKetentuanJenis(body, m.jenis);
   if ("galat" in ketentuan) return kembali(c, jalurUbah, { jenis: "galat", teks: ketentuan.galat });
 
+  const pihak = await bacaPihak(body, { wajibKedua: false, peran: peranPihak(m.jenis) });
+  if ("galat" in pihak) return kembali(c, jalurUbah, { jenis: "galat", teks: pihak.galat });
+
   await perbaruiMuamalah(m.id, {
+    ...pihak,
     judul,
     pokok,
     tanggalAkad,
