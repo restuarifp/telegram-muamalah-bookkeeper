@@ -4,13 +4,19 @@ import {
   JENIS_AKTIF,
   bolehBercicilan,
   isPeriodeCicilan,
+  pakaiBagiHasil,
+  pakaiMargin,
+  pakaiPorsiModal,
   type JenisMuamalah,
   type PeriodeCicilan,
   type StatusMuamalah,
 } from "../types.js";
 import { LABEL_JENIS, formatRupiah, formatTanggal, ringkasSkemaCicilan } from "../utils/format.js";
+import { totalKewajiban } from "../utils/cicilan.js";
 import { parseNominal, parseTanggal, parseTenor } from "../utils/validate.js";
 import { cariPihak, buatPihak, buatMuamalah } from "../services/muamalahService.js";
+import { daftarKantor } from "../services/kantorService.js";
+import { isSuperadmin } from "../types.js";
 import { catatAudit } from "../middlewares/audit.js";
 import { menuUtama } from "../handlers/menu.js";
 
@@ -67,11 +73,41 @@ export async function tambahMuamalah(conversation: Convo, ctx: BotContext) {
     return;
   }
 
+  // 0. Kantor tempat transaksi terjadi. Operator biasa tidak ditanya: kantornya
+  // sudah melekat pada dirinya, dan menawarkan pilihan hanya membuka celah
+  // mencatat transaksi ke kantor lain. Superadmin yang lintas kantor harus memilih.
+  let kantorId: number;
+  if (isSuperadmin(operator)) {
+    const kantor = await conversation.external(() => daftarKantor());
+    if (kantor.length === 0) {
+      await ctx.reply("Belum ada kantor terdaftar. Tambahkan dulu dengan /kantor_tambah <nama>.");
+      return;
+    }
+    const pilihan = await tanyaPilihan(
+      conversation,
+      ctx,
+      "Transaksi ini tercatat di kantor mana?",
+      kantor.map((k) => ({ label: k.nama, data: String(k.id) }))
+    );
+    if (!pilihan) return batal(ctx);
+    kantorId = Number(pilihan);
+  } else if (operator.kantorId) {
+    kantorId = operator.kantorId;
+  } else {
+    await ctx.reply(
+      "⛔ Akun operator Anda belum ditempatkan di kantor mana pun. Hubungi superadmin."
+    );
+    return;
+  }
+
   // 1. Jenis. Kalau cuma satu jenis yang dibuka, langkah ini dilewati — menyodorkan
   // pertanyaan yang jawabannya cuma satu hanya menambah satu ketukan tanpa pilihan.
   let jenis: JenisMuamalah;
-  if (JENIS_AKTIF.length === 1) {
-    jenis = JENIS_AKTIF[0];
+  // Disalin ke variabel bertipe lebar supaya perbandingan di bawah tetap sah
+  // saat JENIS_AKTIF kembali berisi satu jenis saja.
+  const jenisAktif: readonly JenisMuamalah[] = JENIS_AKTIF;
+  if (jenisAktif.length === 1) {
+    jenis = jenisAktif[0];
     await ctx.reply(`Mencatat muamalah jenis *${LABEL_JENIS[jenis]}*.`, {
       parse_mode: "Markdown",
     });
@@ -133,6 +169,28 @@ export async function tambahMuamalah(conversation: Convo, ctx: BotContext) {
     }
   }
 
+  // 4b. Margin — hanya untuk akad jual beli. Yang ditagih ke pembeli adalah
+  // harga jual (pokok + margin), jadi angka ini bukan sekadar catatan.
+  let margin: bigint | null = null;
+  if (pakaiMargin(jenis)) {
+    while (margin === null) {
+      const teksMargin = await tanyaTeks(
+        conversation,
+        ctx,
+        `Berapa marginnya? (keuntungan di atas harga pokok ${formatRupiah(pokok!)}; contoh: 1jt)`
+      );
+      if (teksMargin === null) return batal(ctx);
+      margin = parseNominal(teksMargin);
+      if (margin === null) {
+        await ctx.reply("Format nominal tidak dikenali, coba lagi (contoh: 1jt, 1.500.000).");
+      }
+    }
+    await ctx.reply(
+      `Harga jual: *${formatRupiah(pokok! + margin)}* — itulah yang akan diangsur dan dihitung sebagai sisa.`,
+      { parse_mode: "Markdown" }
+    );
+  }
+
   // 5. Tanggal akad
   let tanggalAkad: Date | null = null;
   while (tanggalAkad === null) {
@@ -164,9 +222,9 @@ export async function tambahMuamalah(conversation: Convo, ctx: BotContext) {
     }
   }
 
-  // 7. Nisbah (hanya investasi)
+  // 7. Nisbah bagi hasil — investasi, mudharabah, musyarakah.
   let nisbah: string | null = null;
-  if (jenis === "INVESTASI") {
+  if (pakaiBagiHasil(jenis)) {
     const teksNisbah = await tanyaTeks(
       conversation,
       ctx,
@@ -175,6 +233,20 @@ export async function tambahMuamalah(conversation: Convo, ctx: BotContext) {
     );
     if (teksNisbah === null) return batal(ctx);
     nisbah = teksNisbah || null;
+  }
+
+  // 7b. Porsi modal — khusus musyarakah, karena kedua pihak sama-sama menyetor
+  // modal dan porsinya boleh berbeda dari nisbah bagi hasilnya.
+  let porsiModal: string | null = null;
+  if (pakaiPorsiModal(jenis)) {
+    const teksPorsi = await tanyaTeks(
+      conversation,
+      ctx,
+      "Porsi modal tiap pihak? (contoh: 70:30 — porsi kita dulu, atau lewati)",
+      { bolehLewati: true }
+    );
+    if (teksPorsi === null) return batal(ctx);
+    porsiModal = teksPorsi || null;
   }
 
   // 8. Skema cicilan — hanya ditanyakan untuk utang/piutang/qardh, dan hanya
@@ -238,20 +310,30 @@ export async function tambahMuamalah(conversation: Convo, ctx: BotContext) {
   // 10. Konfirmasi
   const skemaCicilan = ringkasSkemaCicilan({
     pokok: pokok!,
+    margin,
     tenorCicilan,
     periodeCicilan,
     mulaiCicilan,
   });
+  const namaKantor =
+    (await conversation.external(() => daftarKantor({ termasukNonaktif: true }))).find(
+      (k) => k.id === kantorId
+    )?.nama ?? `#${kantorId}`;
   const ringkasan =
     `Konfirmasi data berikut:\n\n` +
+    `Kantor: ${namaKantor}\n` +
     `Jenis: ${LABEL_JENIS[jenis]}\n` +
     `Pihak: ${namaPihak}\n` +
     `Judul: ${judul}\n` +
     `Pokok: ${formatRupiah(pokok)}\n` +
+    (margin
+      ? `Margin: ${formatRupiah(margin)}\nHarga jual: ${formatRupiah(pokok! + margin)}\n`
+      : "") +
     `Tanggal akad: ${formatTanggal(tanggalAkad)}\n` +
     `Jatuh tempo: ${formatTanggal(jatuhTempo)}\n` +
     (skemaCicilan ? `Cicilan: ${skemaCicilan}, mulai ${formatTanggal(mulaiCicilan)}\n` : "") +
     (nisbah ? `Nisbah: ${nisbah}\n` : "") +
+    (porsiModal ? `Porsi modal: ${porsiModal}\n` : "") +
     (deskripsi ? `Deskripsi: ${deskripsi}\n` : "");
 
   const kbKonfirmasi = new InlineKeyboard()
@@ -276,11 +358,14 @@ export async function tambahMuamalah(conversation: Convo, ctx: BotContext) {
       tanggalAkad: tanggalAkad!,
       jatuhTempo,
       bagiHasilNisbah: nisbah,
+      margin,
+      porsiModal,
       deskripsi,
       status,
       tenorCicilan,
       periodeCicilan,
       mulaiCicilan,
+      kantorId,
       dibuatOlehId: operator.id,
     })
   );
@@ -295,5 +380,5 @@ export async function tambahMuamalah(conversation: Convo, ctx: BotContext) {
 }
 
 async function batal(ctx: BotContext) {
-  await ctx.reply("Dibatalkan.", { reply_markup: menuUtama() });
+  await ctx.reply("Dibatalkan.", { reply_markup: menuUtama(ctx) });
 }

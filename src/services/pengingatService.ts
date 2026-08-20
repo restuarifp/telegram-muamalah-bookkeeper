@@ -12,6 +12,7 @@ import {
   cicilanTerbayar,
   jadwalCicilan,
   punyaCicilan,
+  totalKewajiban,
 } from "../utils/cicilan.js";
 import type { Bot } from "grammy";
 import type { BotContext } from "../bot-context.js";
@@ -52,6 +53,7 @@ export interface KandidatPengingat {
 
 export interface MuamalahUntukPengingat {
   pokok: bigint;
+  margin?: bigint | null;
   jatuhTempo: Date | null;
   tenorCicilan: number | null;
   periodeCicilan: string | null;
@@ -75,7 +77,7 @@ export function pilihPengingat(
   const totalDibayar = m.angsuran.reduce((s, a) => s + a.jumlah, 0n);
 
   if (punyaCicilan(m)) {
-    const jadwal = jadwalCicilan({ ...m, pokok: m.pokok });
+    const jadwal = jadwalCicilan(m);
     const lunas = cicilanTerbayar(jadwal, totalDibayar);
     // Cicilan yang sudah tertutup pembayaran berhenti diingatkan dengan
     // sendirinya — tidak perlu ada penandaan manual.
@@ -153,7 +155,7 @@ export async function prosesPengingatJatuhTempo() {
       // sendiri yang jadi sumber pengingat.
       OR: [{ jatuhTempo: { not: null } }, { tenorCicilan: { not: null } }],
     },
-    include: { pihak: true, angsuran: true },
+    include: { pihak: true, angsuran: true, kantor: true },
   });
 
   const akanDikirim: {
@@ -177,12 +179,13 @@ export async function prosesPengingatJatuhTempo() {
       });
       if (sudah?.terkirimPada) continue;
 
-      const sisa = m.pokok - m.angsuran.reduce((s, a) => s + a.jumlah, 0n);
+      const sisa = totalKewajiban(m) - m.angsuran.reduce((s, a) => s + a.jumlah, 0n);
       const skema = ringkasSkemaCicilan(m);
       // judul & nama pihak diketik operator, jadi harus di-escape: teks ini dikirim
       // dengan parse_mode "Markdown".
       const teks =
         `#${m.id} ${LABEL_JENIS[m.jenis as keyof typeof LABEL_JENIS] ?? m.jenis} — ${escapeMarkdown(m.judul)}\n` +
+        `Kantor: ${escapeMarkdown(m.kantor.nama)}\n` +
         `Pihak: ${escapeMarkdown(m.pihak.nama)} | Sisa: ${formatRupiah(sisa < 0n ? 0n : sisa)}\n` +
         (skema ? `Skema: ${skema}\n` : "") +
         kand.rincian;
@@ -200,22 +203,43 @@ export async function prosesPengingatJatuhTempo() {
   return akanDikirim;
 }
 
+export interface BarisJatuhTempo {
+  id: number;
+  jenis: string;
+  judul: string;
+  pihak: string;
+  sisa: bigint;
+  /** Tanggal yang dipakai menghitung selisih: cicilan berikutnya bila ada. */
+  tanggalAcuan: Date;
+  /** Selisih hari terhadap hari ini; negatif berarti terlambat. */
+  selisih: number;
+  /** Label status siap tampil, mis. "H-3", "hari ini", "terlambat 4 hari". */
+  status: string;
+  /** Cicilan yang jadi acuan, null untuk transaksi tanpa skema cicilan. */
+  cicilan: { urutan: number; tenor: number; jumlah: bigint } | null;
+}
+
 /**
- * Ringkasan jatuh tempo untuk ditampilkan langsung (perintah /jatuhtempo), terlepas dari
- * status kirim di tabel Pengingat — tidak menandai apa pun sebagai terkirim.
+ * Transaksi yang jatuh tempo dalam 7 hari ke depan (termasuk yang sudah
+ * terlambat), sebagai data — bukan teks. Dipakai bersama oleh /jatuhtempo di
+ * bot dan dasbor web; keduanya cuma beda cara menampilkan.
+ *
+ * Terlepas dari status kirim di tabel Pengingat: tidak menandai apa pun sebagai
+ * terkirim.
  */
-export async function ringkasanJatuhTempoTampilan() {
+export async function daftarJatuhTempo(kantorId?: number): Promise<BarisJatuhTempo[]> {
   const hariIni = tanggalHariIni();
   const items = await prisma.muamalah.findMany({
     where: {
       status: "BERJALAN",
+      ...(kantorId !== undefined ? { kantorId } : {}),
       OR: [{ jatuhTempo: { not: null } }, { tenorCicilan: { not: null } }],
     },
     include: { pihak: true, angsuran: true },
     orderBy: { jatuhTempo: "asc" },
   });
 
-  const hasil: { id: number; teks: string; selisih: number }[] = [];
+  const hasil: BarisJatuhTempo[] = [];
 
   for (const m of items) {
     // Tanggal yang relevan: cicilan berikutnya yang belum dibayar kalau ada
@@ -228,23 +252,44 @@ export async function ringkasanJatuhTempoTampilan() {
     const selisih = selisihHariDari(tanggalAcuan, hariIni);
     if (selisih > 7) continue;
 
-    const status =
-      selisih < 0 ? `terlambat ${-selisih} hari` : selisih === 0 ? "hari ini" : `H-${selisih}`;
-    const sisa = m.pokok - totalDibayar;
-    const label = berikut
-      ? `Cicilan ke-${berikut.urutan}/${m.tenorCicilan}: ${formatRupiah(berikut.jumlah)} pada ${formatTanggal(berikut.jatuhTempo)}`
-      : `Jatuh tempo: ${formatTanggal(tanggalAcuan)}`;
-
+    const sisa = totalKewajiban(m) - totalDibayar;
     hasil.push({
       id: m.id,
+      jenis: m.jenis,
+      judul: m.judul,
+      pihak: m.pihak.nama,
+      sisa: sisa < 0n ? 0n : sisa,
+      tanggalAcuan,
       selisih,
-      teks: `#${m.id} ${LABEL_JENIS[m.jenis as keyof typeof LABEL_JENIS] ?? m.jenis} — ${escapeMarkdown(m.judul)} (${escapeMarkdown(m.pihak.nama)})\nSisa: ${formatRupiah(sisa < 0n ? 0n : sisa)} | ${label} (${status})`,
+      status:
+        selisih < 0 ? `terlambat ${-selisih} hari` : selisih === 0 ? "hari ini" : `H-${selisih}`,
+      cicilan: berikut
+        ? { urutan: berikut.urutan, tenor: m.tenorCicilan!, jumlah: berikut.jumlah }
+        : null,
     });
   }
 
   // Urut berdasarkan tanggal acuan, bukan jatuhTempo transaksi — untuk yang
   // bercicilan keduanya bisa jauh berbeda.
-  return hasil.sort((a, b) => a.selisih - b.selisih).map(({ id, teks }) => ({ id, teks }));
+  return hasil.sort((a, b) => a.selisih - b.selisih);
+}
+
+/**
+ * Ringkasan jatuh tempo dalam bentuk teks Markdown untuk perintah /jatuhtempo.
+ */
+export async function ringkasanJatuhTempoTampilan(kantorId?: number) {
+  const items = await daftarJatuhTempo(kantorId);
+  return items.map((i) => {
+    const label = i.cicilan
+      ? `Cicilan ke-${i.cicilan.urutan}/${i.cicilan.tenor}: ${formatRupiah(i.cicilan.jumlah)} pada ${formatTanggal(i.tanggalAcuan)}`
+      : `Jatuh tempo: ${formatTanggal(i.tanggalAcuan)}`;
+    return {
+      id: i.id,
+      teks:
+        `#${i.id} ${LABEL_JENIS[i.jenis as keyof typeof LABEL_JENIS] ?? i.jenis} — ${escapeMarkdown(i.judul)} (${escapeMarkdown(i.pihak)})\n` +
+        `Sisa: ${formatRupiah(i.sisa)} | ${label} (${i.status})`,
+    };
+  });
 }
 
 export async function tandaiTerkirim(

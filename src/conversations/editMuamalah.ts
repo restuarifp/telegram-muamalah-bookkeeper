@@ -15,8 +15,10 @@ type FieldKey = Exclude<FieldMuamalahDapatDiedit, "tanggalAkad">;
 const FIELDS: { key: FieldKey; label: string; petunjuk: string }[] = [
   { key: "judul", label: "Judul", petunjuk: "teks bebas" },
   { key: "pokok", label: "Nominal pokok", petunjuk: "contoh: 5jt" },
+  { key: "margin", label: "Margin (murabahah)", petunjuk: "contoh: 1jt" },
   { key: "jatuhTempo", label: "Jatuh tempo", petunjuk: "contoh: 2026-09-16" },
   { key: "bagiHasilNisbah", label: "Nisbah bagi hasil", petunjuk: "contoh: 60:40" },
+  { key: "porsiModal", label: "Porsi modal (musyarakah)", petunjuk: "contoh: 70:30" },
   { key: "deskripsi", label: "Deskripsi", petunjuk: "teks bebas" },
   { key: "tenorCicilan", label: "Jumlah cicilan", petunjuk: "angka 1–600, contoh: 12" },
   { key: "periodeCicilan", label: "Periode cicilan", petunjuk: "bulanan atau mingguan" },
@@ -56,7 +58,7 @@ export async function editMuamalahConvo(conversation: Convo, ctx: BotContext, mu
     const teks = next.message?.text?.trim();
     if (!teks) continue;
 
-    if (field.key === "pokok") {
+    if (field.key === "pokok" || field.key === "margin") {
       nilaiBaru = parseNominal(teks);
       if (nilaiBaru === null) {
         await ctx.reply("Format nominal tidak dikenali, coba lagi (contoh: 5jt).");

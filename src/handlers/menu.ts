@@ -1,10 +1,16 @@
 import { Composer, InlineKeyboard } from "grammy";
 import type { BotContext } from "../bot-context.js";
+import { isSuperadmin } from "../types.js";
 
 export const menuComposer = new Composer<BotContext>();
 
-export function menuUtama(): InlineKeyboard {
-  return new InlineKeyboard()
+/**
+ * ctx opsional supaya pemanggil lama tetap jalan; kalau diberikan, tombol
+ * lintas-kantor hanya muncul untuk superadmin — operator biasa tidak punya
+ * pilihan kantor untuk diubah.
+ */
+export function menuUtama(ctx?: BotContext): InlineKeyboard {
+  const kb = new InlineKeyboard()
     .text("➕ Tambah", "menu:tambah")
     .text("📋 Daftar", "menu:list")
     .row()
@@ -14,6 +20,8 @@ export function menuUtama(): InlineKeyboard {
     .text("⏰ Jatuh Tempo", "menu:jatuhtempo")
     .row()
     .text("👤 Operator", "menu:operator");
+  if (isSuperadmin(ctx?.operator)) kb.text("🏢 Kantor", "menu:kantor_filter");
+  return kb;
 }
 
 const TEKS_SAMBUTAN =
@@ -22,12 +30,12 @@ const TEKS_SAMBUTAN =
   "Pilih menu di bawah, atau ketik perintah langsung (mis. /list, /rekap).";
 
 menuComposer.command(["start", "menu"], async (ctx) => {
-  await ctx.reply(TEKS_SAMBUTAN, { parse_mode: "Markdown", reply_markup: menuUtama() });
+  await ctx.reply(TEKS_SAMBUTAN, { parse_mode: "Markdown", reply_markup: menuUtama(ctx) });
 });
 
 menuComposer.callbackQuery("menu:utama", async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.editMessageText(TEKS_SAMBUTAN, { parse_mode: "Markdown", reply_markup: menuUtama() });
+  await ctx.editMessageText(TEKS_SAMBUTAN, { parse_mode: "Markdown", reply_markup: menuUtama(ctx) });
 });
 
 menuComposer.callbackQuery("menu:tambah", async (ctx) => {
@@ -66,5 +74,13 @@ menuComposer.callbackQuery("menu:dokumen", async (ctx) => {
 
 menuComposer.callbackQuery("menu:operator", async (ctx) => {
   await ctx.answerCallbackQuery();
-  await ctx.reply("👤 Manajemen operator:\n/operator_list — lihat daftar operator\n/operator_tambah — tambah operator (admin)");
+  await ctx.reply(
+    "👤 Manajemen operator & kantor:\n" +
+      "/operator_list — daftar operator (sekantor; superadmin: semua)\n" +
+      "/operator_tambah — tambah operator & tempatkan di kantor (superadmin)\n" +
+      "/operator_hapus — nonaktifkan operator (superadmin)\n" +
+      "/kantor_list — daftar kantor perwakilan\n" +
+      "/kantor_tambah — tambah kantor (superadmin)\n" +
+      "/kantor_filter — pilih kantor yang ditampilkan (superadmin)"
+  );
 });

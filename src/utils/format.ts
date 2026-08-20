@@ -5,6 +5,7 @@ import {
   nominalCicilan,
   punyaCicilan,
   sudahTerlambat,
+  totalKewajiban,
   type SkemaCicilan,
 } from "./cicilan.js";
 
@@ -42,6 +43,9 @@ export const LABEL_JENIS: Record<JenisMuamalah, string> = {
   PIUTANG: "Piutang",
   INVESTASI: "Investasi",
   QARDH: "Qardh",
+  MURABAHAH: "Murabahah",
+  MUDHARABAH: "Mudharabah",
+  MUSYARAKAH: "Musyarakah",
   LAINNYA: "Lainnya",
 };
 
@@ -62,11 +66,13 @@ export const LABEL_PERIODE: Record<PeriodeCicilan, string> = {
  * Null bila transaksi tidak punya skema cicilan.
  */
 export function ringkasSkemaCicilan(
-  m: SkemaCicilan & { pokok: bigint }
+  m: SkemaCicilan & { pokok: bigint; margin?: bigint | null }
 ): string | null {
   if (!punyaCicilan(m)) return null;
   const periode = LABEL_PERIODE[(m.periodeCicilan ?? "BULANAN") as PeriodeCicilan] ?? "bulanan";
-  const perCicilan = nominalCicilan(m.pokok, m.tenorCicilan!, 1);
+  // Yang diangsur adalah nilai akad, bukan pokok — pada murabahah margin ikut
+  // terbagi ke tiap cicilan.
+  const perCicilan = nominalCicilan(totalKewajiban(m), m.tenorCicilan!, 1);
   return `${m.tenorCicilan}x ${periode} @ ${formatRupiah(perCicilan)}`;
 }
 
@@ -80,6 +86,12 @@ export function ringkasanMuamalah(
     `Pihak: ${m.pihak.nama}`,
     `Pokok: ${formatRupiah(m.pokok)}`,
   ];
+  // Pada murabahah, angka yang ditagih adalah harga jualnya — menampilkan pokok
+  // saja membuat sisa saldo terbaca seolah lebih besar dari nilai akadnya.
+  if (m.margin) {
+    baris.push(`Margin: ${formatRupiah(m.margin)}`);
+    baris.push(`Harga jual: ${formatRupiah(totalKewajiban(m))}`);
+  }
   if (m.sisaSaldo !== undefined) {
     baris.push(`Sisa: ${formatRupiah(m.sisaSaldo)}`);
   }
@@ -94,7 +106,7 @@ export function ringkasanMuamalah(
     // Sisa saldo hanya tersedia di detail (bukan di list), jadi cicilan
     // berikutnya ikut ditampilkan hanya kalau kita tahu sudah dibayar berapa.
     if (m.sisaSaldo !== undefined) {
-      const berikut = cicilanBerikutnya(m, m.pokok - m.sisaSaldo);
+      const berikut = cicilanBerikutnya(m, totalKewajiban(m) - m.sisaSaldo);
       baris.push(
         berikut
           ? `Cicilan berikutnya: ke-${berikut.urutan}/${m.tenorCicilan} — ${formatRupiah(berikut.jumlah)} pada ${formatTanggal(berikut.jatuhTempo)}`
@@ -104,6 +116,7 @@ export function ringkasanMuamalah(
   }
 
   if (m.bagiHasilNisbah) baris.push(`Nisbah: ${m.bagiHasilNisbah}`);
+  if (m.porsiModal) baris.push(`Porsi modal: ${m.porsiModal}`);
   if (m.deskripsi) baris.push(`Deskripsi: ${m.deskripsi}`);
   return baris.join("\n");
 }

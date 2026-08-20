@@ -12,20 +12,37 @@ export interface SkemaCicilan {
   mulaiCicilan: Date | null;
 }
 
+/**
+ * Nilai akad yang sebenarnya harus dibayar.
+ *
+ * Untuk hampir semua jenis ini sama dengan pokok, tapi pada murabahah yang
+ * ditagih adalah **harga jual** = harga pokok + margin. Semua turunan angka —
+ * jadwal cicilan, sisa saldo, rekap, pengingat — wajib lewat sini, bukan
+ * membaca `pokok` langsung; kalau tidak, transaksi murabahah akan tampak lunas
+ * padahal marginnya belum dibayar.
+ */
+export function totalKewajiban(m: { pokok: bigint; margin?: bigint | null }): bigint {
+  return m.pokok + (m.margin ?? 0n);
+}
+
 export function punyaCicilan(m: SkemaCicilan): boolean {
   return m.tenorCicilan !== null && m.tenorCicilan > 0 && m.mulaiCicilan !== null;
 }
 
 /**
- * Nominal tiap cicilan. Pembagian pokok jarang bulat, jadi sisa pembagian
- * ditumpuk ke cicilan terakhir — total selalu persis sama dengan pokok.
+ * Nominal tiap cicilan atas sebuah nilai akad. Pembagian jarang bulat, jadi
+ * sisa pembagian ditumpuk ke cicilan terakhir — totalnya selalu persis sama
+ * dengan nilai yang dibagi.
+ *
+ * Yang dibagi adalah totalKewajiban(), bukan pokok: pada murabahah margin ikut
+ * diangsur bersama harga pokoknya.
  */
-export function nominalCicilan(pokok: bigint, tenor: number, urutan: number): bigint {
+export function nominalCicilan(nilai: bigint, tenor: number, urutan: number): bigint {
   if (tenor <= 0) return 0n;
-  const dasar = pokok / BigInt(tenor);
+  const dasar = nilai / BigInt(tenor);
   if (urutan >= tenor) {
     // Cicilan terakhir menyerap sisa pembagian.
-    return dasar + (pokok - dasar * BigInt(tenor));
+    return dasar + (nilai - dasar * BigInt(tenor));
   }
   return dasar;
 }
@@ -54,17 +71,20 @@ export interface BarisCicilan {
 }
 
 /** Seluruh jadwal cicilan, dihitung dari parameter. Kosong bila skema tidak lengkap. */
-export function jadwalCicilan(m: SkemaCicilan & { pokok: bigint }): BarisCicilan[] {
+export function jadwalCicilan(
+  m: SkemaCicilan & { pokok: bigint; margin?: bigint | null }
+): BarisCicilan[] {
   if (!punyaCicilan(m)) return [];
   const tenor = m.tenorCicilan!;
   const mulai = m.mulaiCicilan!;
   const periode = m.periodeCicilan ?? "BULANAN";
+  const nilai = totalKewajiban(m);
   const hasil: BarisCicilan[] = [];
   for (let urutan = 1; urutan <= tenor; urutan++) {
     hasil.push({
       urutan,
       jatuhTempo: tambahPeriode(mulai, periode, urutan - 1),
-      jumlah: nominalCicilan(m.pokok, tenor, urutan),
+      jumlah: nominalCicilan(nilai, tenor, urutan),
     });
   }
   return hasil;
@@ -88,7 +108,7 @@ export function cicilanTerbayar(jadwal: BarisCicilan[], totalDibayar: bigint): n
 
 /** Cicilan pertama yang belum tertutup pembayaran. Null bila semua sudah lunas. */
 export function cicilanBerikutnya(
-  m: SkemaCicilan & { pokok: bigint },
+  m: SkemaCicilan & { pokok: bigint; margin?: bigint | null },
   totalDibayar: bigint
 ): BarisCicilan | null {
   const jadwal = jadwalCicilan(m);

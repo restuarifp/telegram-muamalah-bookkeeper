@@ -11,11 +11,29 @@ datasource db {
 // SQLite tidak mendukung enum native di Prisma; nilai dibatasi lewat TS union
 // type di src/types.ts dan divalidasi di service layer sebelum ditulis.
 
+// Kantor perwakilan (kanwil). Setiap operator melayani satu kantor, dan setiap
+// transaksi tercatat di kantor tempat ia terjadi — itulah yang membatasi apa
+// yang bisa dilihat operator. Superadmin tidak terikat kantor (kantorId null)
+// dan boleh melihat semuanya.
+model Kantor {
+  id        Int      @id @default(autoincrement())
+  nama      String   @unique
+  aktif     Boolean  @default(true)
+  createdAt DateTime @default(now())
+
+  operator Operator[]
+  muamalah Muamalah[]
+}
+
 model Operator {
   id             Int      @id @default(autoincrement())
   telegramUserId String   @unique
   nama           String
-  role           String   @default("OPERATOR") // "ADMIN" | "OPERATOR"
+  role           String   @default("OPERATOR") // "SUPERADMIN" | "OPERATOR"
+  // null hanya sah untuk SUPERADMIN, yang lintas kantor. Operator biasa selalu
+  // terikat satu kantor; validasinya di service layer (SQLite tanpa CHECK di Prisma).
+  kantorId       Int?
+  kantor         Kantor?  @relation(fields: [kantorId], references: [id])
   aktif          Boolean  @default(true)
   createdAt      DateTime @default(now())
 
@@ -23,6 +41,49 @@ model Operator {
   angsuranDicatat Angsuran[] @relation("DicatatOleh")
   dokumenDiunggah Dokumen[]  @relation("DiunggahOleh")
   auditLogs      AuditLog[]
+  sesiWeb        SesiWeb[]
+  kodeLogin      KodeLogin[]
+}
+
+// Login web memakai OTP yang dikirim lewat Telegram: satu-satunya identitas yang
+// sudah dipercaya sistem ini adalah telegramUserId operator, jadi tidak ada
+// password yang perlu disimpan (dan tidak ada yang bisa bocor).
+model KodeLogin {
+  // Sekaligus penanda percobaan login di cookie browser: kode hanya bisa
+  // ditukar oleh browser yang memintanya, bukan oleh siapa pun yang kebetulan
+  // melihat 6 angka itu di layar Telegram orang lain.
+  id          String    @id
+  operatorId  Int
+  operator    Operator  @relation(fields: [operatorId], references: [id])
+  // Kode disimpan sebagai HMAC, bukan teks polos: isi database ini ikut ke
+  // backup, dan kode yang masih hidup berarti sesi yang bisa dicuri.
+  kodeHash    String
+  percobaan   Int       @default(0)
+  kedaluwarsa DateTime
+  dipakaiPada DateTime?
+  createdAt   DateTime  @default(now())
+
+  @@index([operatorId])
+  @@index([kedaluwarsa])
+}
+
+model SesiWeb {
+  // Token acak 256-bit; disimpan ter-hash dengan alasan yang sama seperti kode
+  // login — baris ini setara dengan sesi yang sedang berjalan.
+  tokenHash     String   @id
+  operatorId    Int
+  operator      Operator @relation(fields: [operatorId], references: [id])
+  // Filter kantor superadmin, padanan ctx.session.kantorFilter di bot. Disimpan
+  // di server, bukan di cookie, supaya lingkup tampilan tidak bisa dikarang
+  // browser.
+  kantorFilter  Int?
+  userAgent     String?
+  kedaluwarsa   DateTime
+  terakhirAktif DateTime @default(now())
+  createdAt     DateTime @default(now())
+
+  @@index([operatorId])
+  @@index([kedaluwarsa])
 }
 
 model Pihak {
@@ -51,6 +112,15 @@ model Muamalah {
   // kebenaran yang bisa berbeda kalau jatuhTempo diedit.
   status          String          @default("BERJALAN") // DRAFT | BERJALAN | SELESAI | BATAL
   bagiHasilNisbah String?
+  // Murabahah: margin/keuntungan yang disepakati di atas harga pokok. Kewajiban
+  // pembeli = pokok + margin, dan seluruh turunannya (jadwal cicilan, sisa
+  // saldo, rekap) dihitung dari totalKewajiban() di src/utils/cicilan.ts —
+  // bukan dari pokok. NULL untuk jenis yang tidak mengenal margin.
+  margin          BigInt?
+  // Musyarakah: porsi modal tiap pihak, mis. "70:30". Disimpan sebagai teks
+  // seperti bagiHasilNisbah — yang dibutuhkan cuma keterbacaan, dan porsi modal
+  // sengaja terpisah dari nisbah karena keduanya boleh berbeda.
+  porsiModal      String?
   deskripsi       String?
 
   // Skema cicilan, hanya relevan untuk UTANG/PIUTANG/QARDH. Jadwal tidak
@@ -59,6 +129,8 @@ model Muamalah {
   tenorCicilan    Int?
   periodeCicilan  String?         // BULANAN | MINGGUAN
   mulaiCicilan    DateTime?
+  kantorId        Int
+  kantor          Kantor          @relation(fields: [kantorId], references: [id])
   dibuatOlehId    Int
   dibuatOleh      Operator        @relation("DibuatOleh", fields: [dibuatOlehId], references: [id])
   createdAt       DateTime        @default(now())
@@ -70,6 +142,7 @@ model Muamalah {
 
   @@index([status])
   @@index([jatuhTempo])
+  @@index([kantorId])
 }
 
 model Angsuran {

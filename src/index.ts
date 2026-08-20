@@ -11,6 +11,7 @@ import { menuComposer } from "./handlers/menu.js";
 import { muamalahComposer } from "./handlers/muamalah.js";
 import { dokumenComposer } from "./handlers/dokumen.js";
 import { operatorComposer } from "./handlers/operator.js";
+import { kantorComposer } from "./handlers/kantor.js";
 import { laporanComposer } from "./handlers/laporan.js";
 import { groupInfoComposer, initComposer } from "./handlers/groupInfo.js";
 import { tambahMuamalah } from "./conversations/tambahMuamalah.js";
@@ -25,18 +26,27 @@ import {
 } from "./conversations/ubahNamaDokumen.js";
 import { jadwalkanReminderHarian } from "./jobs/reminderJob.js";
 import { pastikanFolder } from "./services/nextcloud.js";
+import { pastikanKantorPusat } from "./services/kantorService.js";
+import { mulaiWebServer } from "./web/server.js";
 
-async function seedAdminAwal() {
+/**
+ * Admin dari ADMIN_IDS adalah superadmin: lintas kantor, jadi kantorId-nya
+ * sengaja NULL. Kantor Pusat dipastikan ada lebih dulu agar operator pertama
+ * selalu punya kantor yang bisa dipilih (dan agar instalasi baru sejalan dengan
+ * migrasi data lama, yang juga memakai kantor bernama sama).
+ */
+async function seedAwal() {
+  const pusat = await pastikanKantorPusat();
   for (const telegramUserId of config.adminIds) {
     await prisma.operator.upsert({
       where: { telegramUserId },
-      create: { telegramUserId, nama: `Admin ${telegramUserId}`, role: "ADMIN" },
-      update: { role: "ADMIN", aktif: true },
+      create: { telegramUserId, nama: `Superadmin ${telegramUserId}`, role: "SUPERADMIN" },
+      update: { role: "SUPERADMIN", kantorId: null, aktif: true },
     });
   }
-  if (config.adminIds.length > 0) {
-    console.log(`[seed] ${config.adminIds.length} admin awal dipastikan terdaftar.`);
-  }
+  console.log(
+    `[seed] Kantor "${pusat.nama}" siap; ${config.adminIds.length} superadmin awal dipastikan terdaftar.`
+  );
 }
 
 /**
@@ -75,7 +85,7 @@ function jadwalkanHealthcheck() {
 async function main() {
   await fs.mkdir(config.dataDir, { recursive: true });
   await siapkanFolderNextcloud();
-  await seedAdminAwal();
+  await seedAwal();
 
   const bot = new Bot<BotContext>(config.botToken);
 
@@ -114,6 +124,7 @@ async function main() {
   bot.use(muamalahComposer);
   bot.use(dokumenComposer);
   bot.use(operatorComposer);
+  bot.use(kantorComposer);
   bot.use(laporanComposer);
 
   bot.catch(handleBotError);
@@ -128,15 +139,22 @@ async function main() {
     { command: "rekap", description: "Rekap ringkasan muamalah aktif" },
     { command: "jatuhtempo", description: "Lihat transaksi yang jatuh tempo" },
     { command: "template", description: "Daftar & kelola template akad" },
-    { command: "template_tambah", description: "Daftarkan template dari tautan Nextcloud (admin)" },
-    { command: "template_sinkron", description: "Periksa ulang template ke Nextcloud (admin)" },
+    { command: "template_tambah", description: "Daftarkan template dari tautan Nextcloud (superadmin)" },
+    { command: "template_sinkron", description: "Periksa ulang template ke Nextcloud (superadmin)" },
     { command: "operator_list", description: "Lihat daftar operator" },
-    { command: "operator_tambah", description: "Tambah operator (admin)" },
-    { command: "operator_hapus", description: "Nonaktifkan operator (admin)" },
+    { command: "operator_tambah", description: "Tambah operator + kantornya (superadmin)" },
+    { command: "operator_hapus", description: "Nonaktifkan operator (superadmin)" },
+    { command: "kantor_list", description: "Daftar kantor perwakilan" },
+    { command: "kantor_tambah", description: "Tambah kantor perwakilan (superadmin)" },
+    { command: "kantor_filter", description: "Pilih kantor yang ditampilkan (superadmin)" },
   ]);
 
   jadwalkanReminderHarian(bot);
   jadwalkanHealthcheck();
+
+  // Web UI hidup di proses yang sama: satu database, satu service layer, jadi
+  // apa pun yang dicatat lewat web langsung terlihat di bot dan sebaliknya.
+  if (config.web.enabled) mulaiWebServer();
 
   console.log(
     config.groupId

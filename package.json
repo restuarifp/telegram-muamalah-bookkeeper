@@ -7,6 +7,8 @@
   "main": "dist/index.js",
   "scripts": {
     "dev": "tsx watch src/index.ts",
+    "web": "tsx src/web/main.ts",
+    "web:dev": "tsx watch src/web/main.ts",
     "build": "tsc -p tsconfig.json",
     "start": "node dist/index.js",
     "job:reminder": "tsx src/jobs/runReminderOnce.ts",
@@ -18,10 +20,12 @@
   },
   "dependencies": {
     "@grammyjs/conversations": "^2.0.1",
+    "@hono/node-server": "^2.1.1",
     "@prisma/client": "^5.20.0",
     "dotenv": "^16.4.5",
     "fast-xml-parser": "^5.11.0",
     "grammy": "^1.30.0",
+    "hono": "^4.13.3",
     "node-cron": "^3.0.3"
   },
   "devDependencies": {

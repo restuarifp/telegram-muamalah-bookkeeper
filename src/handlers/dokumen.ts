@@ -1,4 +1,5 @@
 import { Composer, InlineKeyboard } from "grammy";
+import { isSuperadmin } from "../types.js";
 import type { BotContext } from "../bot-context.js";
 import {
   ambilDokumen,
@@ -14,6 +15,8 @@ import {
 import { detailMuamalah } from "../services/muamalahService.js";
 import { NextcloudError, urlUnduh } from "../services/nextcloud.js";
 import { catatAudit } from "../middlewares/audit.js";
+import { bolehAksesKantor } from "../middlewares/auth.js";
+import { prisma } from "../db.js";
 import { OPSI_TAUTAN, escapeHtml, formatUkuran, tautanTersamar } from "../utils/tautan.js";
 import { formatTanggal } from "../utils/format.js";
 import { menuUtama } from "./menu.js";
@@ -51,7 +54,37 @@ function butuhOperator(ctx: BotContext): boolean {
 }
 
 function butuhAdmin(ctx: BotContext): boolean {
-  return ctx.operator?.role === "ADMIN";
+  return isSuperadmin(ctx.operator);
+}
+
+/**
+ * Dokumen mewarisi lingkup kantor dari transaksi induknya — tidak ada dokumen
+ * akad yang berdiri sendiri. Kedua penjaga di bawah dipakai di setiap jalur
+ * dokumen akad; template sengaja tidak dibatasi kantor karena memang dipakai
+ * bersama semua kantor.
+ */
+async function bolehTransaksi(ctx: BotContext, muamalahId: number): Promise<boolean> {
+  const m = await prisma.muamalah.findUnique({
+    where: { id: muamalahId },
+    select: { kantorId: true },
+  });
+  if (!m || !bolehAksesKantor(ctx, m.kantorId)) {
+    await ctx.reply("⛔ Transaksi ini bukan milik kantor Anda.");
+    return false;
+  }
+  return true;
+}
+
+async function bolehDokumen(ctx: BotContext, dokumenId: number): Promise<boolean> {
+  const d = await prisma.dokumen.findUnique({
+    where: { id: dokumenId },
+    select: { muamalah: { select: { kantorId: true } } },
+  });
+  if (!d || !bolehAksesKantor(ctx, d.muamalah.kantorId)) {
+    await ctx.reply("⛔ Dokumen ini bukan milik kantor Anda.");
+    return false;
+  }
+  return true;
 }
 
 /**
@@ -132,7 +165,7 @@ dokumenComposer.callbackQuery(/^dokumen:tpl:detail:(\d+)$/, async (ctx) => {
 
 dokumenComposer.command("template_tambah", async (ctx) => {
   if (!butuhAdmin(ctx)) {
-    await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+    await ctx.reply("⛔ Perintah ini hanya untuk superadmin.");
     return;
   }
   await ctx.conversation.enter("tambahTemplate");
@@ -141,7 +174,7 @@ dokumenComposer.command("template_tambah", async (ctx) => {
 dokumenComposer.callbackQuery("dokumen:tpl:tambah", async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!butuhAdmin(ctx)) {
-    await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+    await ctx.reply("⛔ Perintah ini hanya untuk superadmin.");
     return;
   }
   await ctx.conversation.enter("tambahTemplate");
@@ -150,7 +183,7 @@ dokumenComposer.callbackQuery("dokumen:tpl:tambah", async (ctx) => {
 dokumenComposer.callbackQuery(/^dokumen:tpl:judul:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!butuhAdmin(ctx)) {
-    await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+    await ctx.reply("⛔ Perintah ini hanya untuk superadmin.");
     return;
   }
   await ctx.conversation.enter("ubahJudulTemplate", Number(ctx.match![1]));
@@ -159,7 +192,7 @@ dokumenComposer.callbackQuery(/^dokumen:tpl:judul:(\d+)$/, async (ctx) => {
 dokumenComposer.callbackQuery(/^dokumen:tpl:ganti:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!butuhAdmin(ctx)) {
-    await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+    await ctx.reply("⛔ Perintah ini hanya untuk superadmin.");
     return;
   }
   const t = await ambilTemplate(Number(ctx.match![1]));
@@ -174,7 +207,7 @@ dokumenComposer.callbackQuery(/^dokumen:tpl:ganti:(\d+)$/, async (ctx) => {
 dokumenComposer.callbackQuery(/^dokumen:tpl:hapus:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!butuhAdmin(ctx)) {
-    await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+    await ctx.reply("⛔ Perintah ini hanya untuk superadmin.");
     return;
   }
   const t = await ambilTemplate(Number(ctx.match![1]));
@@ -212,7 +245,7 @@ dokumenComposer.callbackQuery(/^dokumen:tpl:hapus_ya:(\d+)$/, async (ctx) => {
 
 dokumenComposer.command("template_sinkron", async (ctx) => {
   if (!butuhAdmin(ctx)) {
-    await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+    await ctx.reply("⛔ Perintah ini hanya untuk superadmin.");
     return;
   }
   await jalankanSinkronTemplate(ctx);
@@ -221,7 +254,7 @@ dokumenComposer.command("template_sinkron", async (ctx) => {
 dokumenComposer.callbackQuery("dokumen:tpl:sinkron", async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!butuhAdmin(ctx)) {
-    await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+    await ctx.reply("⛔ Perintah ini hanya untuk superadmin.");
     return;
   }
   await jalankanSinkronTemplate(ctx);
@@ -326,12 +359,16 @@ async function tampilkanDetailDokumen(ctx: BotContext, id: number) {
 
 dokumenComposer.callbackQuery(/^dokumen:akad:list:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  await tampilkanDaftarDokumen(ctx, Number(ctx.match![1]));
+  const muamalahId = Number(ctx.match![1]);
+  if (!(await bolehTransaksi(ctx, muamalahId))) return;
+  await tampilkanDaftarDokumen(ctx, muamalahId);
 });
 
 dokumenComposer.callbackQuery(/^dokumen:akad:detail:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  await tampilkanDetailDokumen(ctx, Number(ctx.match![1]));
+  const id = Number(ctx.match![1]);
+  if (!(await bolehDokumen(ctx, id))) return;
+  await tampilkanDetailDokumen(ctx, id);
 });
 
 dokumenComposer.callbackQuery(/^dokumen:akad:tautkan:(\d+)$/, async (ctx) => {
@@ -340,7 +377,9 @@ dokumenComposer.callbackQuery(/^dokumen:akad:tautkan:(\d+)$/, async (ctx) => {
     await ctx.reply("⛔ Anda belum terdaftar sebagai operator.");
     return;
   }
-  await ctx.conversation.enter("tautkanDokumen", Number(ctx.match![1]));
+  const muamalahId = Number(ctx.match![1]);
+  if (!(await bolehTransaksi(ctx, muamalahId))) return;
+  await ctx.conversation.enter("tautkanDokumen", muamalahId);
 });
 
 dokumenComposer.callbackQuery(/^dokumen:akad:nama:(\d+)$/, async (ctx) => {
@@ -349,7 +388,9 @@ dokumenComposer.callbackQuery(/^dokumen:akad:nama:(\d+)$/, async (ctx) => {
     await ctx.reply("⛔ Anda belum terdaftar sebagai operator.");
     return;
   }
-  await ctx.conversation.enter("ubahNamaDokumen", Number(ctx.match![1]));
+  const dokumenId = Number(ctx.match![1]);
+  if (!(await bolehDokumen(ctx, dokumenId))) return;
+  await ctx.conversation.enter("ubahNamaDokumen", dokumenId);
 });
 
 dokumenComposer.callbackQuery(/^dokumen:akad:hapus:(\d+)$/, async (ctx) => {
@@ -358,7 +399,9 @@ dokumenComposer.callbackQuery(/^dokumen:akad:hapus:(\d+)$/, async (ctx) => {
     await ctx.reply("⛔ Anda belum terdaftar sebagai operator.");
     return;
   }
-  const d = await ambilDokumen(Number(ctx.match![1]));
+  const dokumenId = Number(ctx.match![1]);
+  if (!(await bolehDokumen(ctx, dokumenId))) return;
+  const d = await ambilDokumen(dokumenId);
   if (!d) {
     await ctx.reply("Dokumen tidak ditemukan.");
     return;
@@ -380,6 +423,7 @@ dokumenComposer.callbackQuery(/^dokumen:akad:hapus_ya:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
   if (!butuhOperator(ctx)) return;
   const id = Number(ctx.match![1]);
+  if (!(await bolehDokumen(ctx, id))) return;
   const hasil = await coba(ctx, () => hapusDokumen(id));
   if (!hasil.ok) return;
   const d = hasil.nilai;
@@ -411,6 +455,7 @@ dokumenComposer.callbackQuery(/^dokumen:akad:sinkron:(\d+)$/, async (ctx) => {
     return;
   }
   const muamalahId = Number(ctx.match![1]);
+  if (!(await bolehTransaksi(ctx, muamalahId))) return;
   const m = await detailMuamalah(muamalahId);
   if (!m) {
     await ctx.reply("Transaksi tidak ditemukan.");

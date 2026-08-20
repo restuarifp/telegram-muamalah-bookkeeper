@@ -2,7 +2,8 @@ import type { NextFunction } from "grammy";
 import { prisma } from "../db.js";
 import type { BotContext } from "../bot-context.js";
 import { config } from "../config.js";
-import { isRole } from "../types.js";
+import { isRole, isSuperadmin } from "../types.js";
+import { bolehAksesKantorUntuk, lingkupKantorUntuk } from "../services/akses.js";
 
 export function chatDiizinkan(chatId?: number | string, userId?: number | string): boolean {
   if (config.groupId && chatId?.toString() === config.groupId) return true;
@@ -47,10 +48,30 @@ export async function requireOperator(ctx: BotContext, next: NextFunction) {
   await next();
 }
 
-export async function requireAdmin(ctx: BotContext, next: NextFunction) {
-  if (!ctx.operator || ctx.operator.role !== "ADMIN") {
-    await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+export async function requireSuperadmin(ctx: BotContext, next: NextFunction) {
+  if (!isSuperadmin(ctx.operator)) {
+    await ctx.reply("⛔ Perintah ini hanya untuk superadmin.");
     return;
   }
   await next();
+}
+
+/**
+ * Kantor mana saja yang boleh dibaca pemanggil, dalam bentuk yang langsung bisa
+ * dipakai sebagai filter query:
+ *   number    → dibatasi ke satu kantor (operator, atau superadmin yang memfilter)
+ *   undefined → semua kantor (superadmin tanpa filter)
+ *   null      → tidak berhak melihat apa pun (bukan operator, atau operator
+ *               tanpa kantor — data yang tidak sah, jangan diam-diam dibuka)
+ *
+ * Semua daftar/rekap harus lewat sini, bukan membaca ctx.operator.kantorId
+ * sendiri, supaya filter superadmin dan pembatasan operator punya satu sumber.
+ */
+export function lingkupKantor(ctx: BotContext): number | undefined | null {
+  return lingkupKantorUntuk(ctx.operator, ctx.session.kantorFilter);
+}
+
+/** Apakah pemanggil boleh membuka satu transaksi milik kantor tertentu. */
+export function bolehAksesKantor(ctx: BotContext, kantorId: number): boolean {
+  return bolehAksesKantorUntuk(ctx.operator, kantorId, ctx.session.kantorFilter);
 }

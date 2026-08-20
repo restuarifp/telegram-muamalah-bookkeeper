@@ -9,8 +9,10 @@ import {
 import { ringkasanMuamalah, formatRupiah, LABEL_JENIS } from "../utils/format.js";
 import { OPSI_TAUTAN, escapeHtml, tautanTersamar } from "../utils/tautan.js";
 import { sudahTerlambat } from "../utils/cicilan.js";
-import { JENIS_AKTIF, isJenisMuamalah } from "../types.js";
+import { JENIS_AKTIF, isJenisMuamalah, isSuperadmin } from "../types.js";
 import { catatAudit } from "../middlewares/audit.js";
+import { bolehAksesKantor, lingkupKantor } from "../middlewares/auth.js";
+import { prisma } from "../db.js";
 import { menuUtama } from "./menu.js";
 
 export const muamalahComposer = new Composer<BotContext>();
@@ -34,23 +36,41 @@ function kartuList(items: Awaited<ReturnType<typeof daftarMuamalah>>["items"], h
   return kb;
 }
 
+/** Label lingkup yang sedang ditampilkan, supaya jelas daftar ini kantor mana. */
+async function labelKantor(ctx: BotContext, kantorId: number | undefined): Promise<string> {
+  if (kantorId === undefined) return "semua kantor";
+  const kantor = await prisma.kantor.findUnique({ where: { id: kantorId } });
+  return kantor?.nama ?? `kantor #${kantorId}`;
+}
+
 async function tampilkanList(ctx: BotContext, halaman: number, edit: boolean) {
+  const lingkup = lingkupKantor(ctx);
+  if (lingkup === null) {
+    await ctx.reply(
+      "⛔ Anda belum terdaftar sebagai operator kantor mana pun. Hubungi superadmin untuk didaftarkan."
+    );
+    return;
+  }
+
   const filter = ctx.session.listFilter ?? {};
   const { items, total } = await daftarMuamalah({
     jenis: filter.jenis,
     status: filter.status,
+    kantorId: lingkup,
     skip: halaman * HALAMAN_UKURAN,
     take: HALAMAN_UKURAN,
   });
 
+  const namaKantor = await labelKantor(ctx, lingkup);
+
   if (total === 0) {
-    const teks = "Belum ada data muamalah yang tercatat.";
-    if (edit) await ctx.editMessageText(teks, { reply_markup: menuUtama() });
-    else await ctx.reply(teks, { reply_markup: menuUtama() });
+    const teks = `Belum ada data muamalah yang tercatat untuk ${namaKantor}.`;
+    if (edit) await ctx.editMessageText(teks, { reply_markup: menuUtama(ctx) });
+    else await ctx.reply(teks, { reply_markup: menuUtama(ctx) });
     return;
   }
 
-  const teks = `📋 Daftar Muamalah (${total} total)\nKetuk item untuk detail:`;
+  const teks = `📋 Daftar Muamalah — ${namaKantor} (${total} total)\nKetuk item untuk detail:`;
   const kb = kartuList(items, halaman, total);
   if (edit) await ctx.editMessageText(teks, { reply_markup: kb });
   else await ctx.reply(teks, { reply_markup: kb });
@@ -96,10 +116,20 @@ async function tampilkanDetail(ctx: BotContext, id: number) {
     await ctx.reply("Transaksi tidak ditemukan (mungkin sudah dihapus).");
     return;
   }
-  const teks = ringkasanMuamalah(m as any);
+  if (!bolehAksesKantor(ctx, m.kantorId)) {
+    // Pesannya sengaja sama dengan "tidak ditemukan": id transaksi berurutan,
+    // jadi membedakan keduanya sama saja memberi tahu kantor lain punya apa.
+    await ctx.reply("Transaksi tidak ditemukan (mungkin sudah dihapus).");
+    return;
+  }
+  const teks = ringkasanMuamalah(m as any) + `\nKantor: ${m.kantor.nama}`;
   const daftarAngsuran = m.angsuran.length
     ? "\n\nRiwayat angsuran:\n" +
-      m.angsuran.map((a) => `• ${formatRupiah(a.jumlah)} (${a.tanggal.toISOString().slice(0, 10)})`).join("\n")
+      // Bernomor, bukan bertitik: angsuran sudah urut tanggal, dan nomornya yang
+      // dipakai operator untuk menyebut satu pembayaran ("angsuran ke-3").
+      m.angsuran
+        .map((a, i) => `${i + 1}. ${formatRupiah(a.jumlah)} (${a.tanggal.toISOString().slice(0, 10)})`)
+        .join("\n")
     : "";
 
   // Bagian di atas ini teks biasa, jadi di-escape sekali di sini; baris dokumen
@@ -127,52 +157,59 @@ muamalahComposer.callbackQuery(/^muamalah:detail:(\d+)$/, async (ctx) => {
   await tampilkanDetail(ctx, Number(ctx.match![1]));
 });
 
-muamalahComposer.callbackQuery(/^muamalah:angsuran:(\d+)$/, async (ctx) => {
-  await ctx.answerCallbackQuery();
+/**
+ * Gerbang untuk setiap aksi yang menyebut id transaksi: operator harus terdaftar
+ * DAN transaksinya harus milik kantornya. Dipakai semua callback di bawah supaya
+ * tidak ada satu pun jalur aksi yang lolos tanpa cek kantor — id transaksi mudah
+ * ditebak, jadi tombol bukan satu-satunya cara sebuah id sampai ke sini.
+ */
+async function bolehMengelola(ctx: BotContext, id: number): Promise<boolean> {
   if (!ctx.operator) {
     await ctx.reply("⛔ Anda belum terdaftar sebagai operator.");
-    return;
+    return false;
   }
-  await ctx.conversation.enter("catatAngsuran", Number(ctx.match![1]));
+  const m = await prisma.muamalah.findUnique({ where: { id }, select: { kantorId: true } });
+  if (!m || !bolehAksesKantor(ctx, m.kantorId)) {
+    await ctx.reply("⛔ Transaksi ini bukan milik kantor Anda.");
+    return false;
+  }
+  return true;
+}
+
+muamalahComposer.callbackQuery(/^muamalah:angsuran:(\d+)$/, async (ctx) => {
+  await ctx.answerCallbackQuery();
+  const id = Number(ctx.match![1]);
+  if (!(await bolehMengelola(ctx, id))) return;
+  await ctx.conversation.enter("catatAngsuran", id);
 });
 
 muamalahComposer.callbackQuery(/^muamalah:upload:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  if (!ctx.operator) {
-    await ctx.reply("⛔ Anda belum terdaftar sebagai operator.");
-    return;
-  }
-  await ctx.conversation.enter("uploadDokumen", Number(ctx.match![1]));
+  const id = Number(ctx.match![1]);
+  if (!(await bolehMengelola(ctx, id))) return;
+  await ctx.conversation.enter("uploadDokumen", id);
 });
 
 muamalahComposer.callbackQuery(/^muamalah:edit:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  if (!ctx.operator) {
-    await ctx.reply("⛔ Anda belum terdaftar sebagai operator.");
-    return;
-  }
-  await ctx.conversation.enter("editMuamalah", Number(ctx.match![1]));
+  const id = Number(ctx.match![1]);
+  if (!(await bolehMengelola(ctx, id))) return;
+  await ctx.conversation.enter("editMuamalah", id);
 });
 
 muamalahComposer.callbackQuery(/^muamalah:selesai:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  if (!ctx.operator) {
-    await ctx.reply("⛔ Anda belum terdaftar sebagai operator.");
-    return;
-  }
   const id = Number(ctx.match![1]);
+  if (!(await bolehMengelola(ctx, id))) return;
   await ubahStatus(id, "SELESAI");
   await catatAudit(ctx, "UPDATE", "Muamalah", id, { status: "SELESAI" });
-  await ctx.reply(`✅ #${id} ditandai SELESAI.`, { reply_markup: menuUtama() });
+  await ctx.reply(`✅ #${id} ditandai SELESAI.`, { reply_markup: menuUtama(ctx) });
 });
 
 muamalahComposer.callbackQuery(/^muamalah:jalankan:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  if (!ctx.operator) {
-    await ctx.reply("⛔ Anda belum terdaftar sebagai operator.");
-    return;
-  }
   const id = Number(ctx.match![1]);
+  if (!(await bolehMengelola(ctx, id))) return;
   await ubahStatus(id, "BERJALAN");
   await catatAudit(ctx, "UPDATE", "Muamalah", id, { status: "BERJALAN" });
   await ctx.reply(
@@ -183,11 +220,8 @@ muamalahComposer.callbackQuery(/^muamalah:jalankan:(\d+)$/, async (ctx) => {
 
 muamalahComposer.callbackQuery(/^muamalah:hapus:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  if (!ctx.operator) {
-    await ctx.reply("⛔ Anda belum terdaftar sebagai operator.");
-    return;
-  }
   const id = Number(ctx.match![1]);
+  if (!(await bolehMengelola(ctx, id))) return;
   const kb = new InlineKeyboard()
     .text("✅ Ya, batalkan transaksi", `muamalah:hapus_konfirmasi:${id}`)
     .text("❌ Tidak", "menu:utama");
@@ -199,17 +233,16 @@ muamalahComposer.callbackQuery(/^muamalah:hapus:(\d+)$/, async (ctx) => {
 
 muamalahComposer.callbackQuery(/^muamalah:hapus_konfirmasi:(\d+)$/, async (ctx) => {
   await ctx.answerCallbackQuery();
-  if (!ctx.operator) return;
   const id = Number(ctx.match![1]);
-  const hardDelete = ctx.operator.role === "ADMIN";
-  await hapusMuamalah(id, false); // soft delete selalu; hard delete disediakan lewat /hapus_permanen admin-only
+  if (!(await bolehMengelola(ctx, id))) return;
+  await hapusMuamalah(id, false); // soft delete selalu; hard delete disediakan lewat /hapus_permanen superadmin-only
   await catatAudit(ctx, "DELETE", "Muamalah", id, { hardDelete: false });
-  await ctx.reply(`🗑️ Transaksi #${id} dibatalkan.`, { reply_markup: menuUtama() });
+  await ctx.reply(`🗑️ Transaksi #${id} dibatalkan.`, { reply_markup: menuUtama(ctx) });
 });
 
 muamalahComposer.command("hapus_permanen", async (ctx) => {
-  if (!ctx.operator || ctx.operator.role !== "ADMIN") {
-    await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+  if (!isSuperadmin(ctx.operator)) {
+    await ctx.reply("⛔ Perintah ini hanya untuk superadmin.");
     return;
   }
   const id = Number(ctx.match?.trim());

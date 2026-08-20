@@ -1,4 +1,5 @@
 import { InlineKeyboard } from "grammy";
+import { isSuperadmin } from "../types.js";
 import type { BotContext, Convo } from "../bot-context.js";
 import {
   DokumenTautanError,
@@ -103,8 +104,8 @@ export async function ubahJudulTemplateConvo(
   ctx: BotContext,
   templateId: number
 ) {
-  if (!ctx.operator || ctx.operator.role !== "ADMIN") {
-    await ctx.reply("⛔ Perintah ini hanya untuk admin.");
+  if (!isSuperadmin(ctx.operator)) {
+    await ctx.reply("⛔ Perintah ini hanya untuk superadmin.");
     return;
   }
 

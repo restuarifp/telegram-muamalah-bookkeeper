@@ -37,8 +37,25 @@ const nextcloudBaseDir = rapikanPath(
   process.env.NEXTCLOUD_BASE_DIR ?? "/Documents/Akad Muamalah"
 );
 
+// Web UI dimatikan secara default: instalasi lama yang cuma memakai bot tidak
+// perlu tiba-tiba membuka port. Isi WEB_ENABLED=true untuk menyalakannya.
+const webEnabled = /^(1|true|ya|yes)$/i.test(process.env.WEB_ENABLED?.trim() ?? "");
+
 export const config = {
   botToken: required("BOT_TOKEN"),
+  web: {
+    enabled: webEnabled,
+    port: Number(process.env.WEB_PORT ?? 3000),
+    host: process.env.WEB_HOST ?? "0.0.0.0",
+    // Cookie sesi diberi flag Secure kecuali dimatikan eksplisit — di balik
+    // reverse proxy HTTPS itu yang benar, dan untuk uji coba di http://localhost
+    // tinggal set WEB_SECURE_COOKIE=false.
+    secureCookie: !/^(0|false|tidak|no)$/i.test(
+      process.env.WEB_SECURE_COOKIE?.trim() ?? "true"
+    ),
+    // Umur sesi login web, dihitung sejak login (bukan sejak aktivitas terakhir).
+    sesiJam: Number(process.env.WEB_SESSION_HOURS ?? 12),
+  },
   groupId,
   adminIds,
   timezone: process.env.TZ ?? "Asia/Jakarta",
@@ -56,6 +73,9 @@ export const config = {
       PIUTANG: "Piutang",
       INVESTASI: "Investasi",
       QARDH: "Qardh",
+      MURABAHAH: "Murabahah",
+      MUDHARABAH: "Mudharabah",
+      MUSYARAKAH: "Musyarakah",
       LAINNYA: "Lainnya",
     } as Record<string, string>,
   },

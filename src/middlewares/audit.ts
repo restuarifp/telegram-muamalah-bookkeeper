@@ -14,9 +14,24 @@ export async function catatAudit(
   payload?: unknown
 ) {
   if (!ctx.operator) return;
+  await catatAuditOperator(ctx.operator.id, aksi, entitas, entitasId, payload);
+}
+
+/**
+ * Versi tanpa context Telegram, dipakai web UI: mutasi lewat halaman web harus
+ * meninggalkan jejak yang sama seperti mutasi lewat bot, jadi keduanya menulis
+ * ke tabel yang sama lewat fungsi yang sama.
+ */
+export async function catatAuditOperator(
+  operatorId: number,
+  aksi: string,
+  entitas: string,
+  entitasId: number,
+  payload?: unknown
+) {
   await prisma.auditLog.create({
     data: {
-      operatorId: ctx.operator.id,
+      operatorId,
       aksi,
       entitas,
       entitasId,
