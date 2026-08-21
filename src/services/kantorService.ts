@@ -16,7 +16,9 @@ export async function cariKantor(idAtauNama: string) {
     if (byId) return byId;
   }
   return prisma.kantor.findFirst({
-    where: { nama: { contains: idAtauNama.trim() } },
+    // Peka huruf besar-kecil di PostgreSQL kalau tidak diminta sebaliknya, jadi
+    // "/kantor_hapus surabaya" tidak akan menemukan "Kanwil Surabaya".
+    where: { nama: { contains: idAtauNama.trim(), mode: "insensitive" } },
     orderBy: { nama: "asc" },
   });
 }

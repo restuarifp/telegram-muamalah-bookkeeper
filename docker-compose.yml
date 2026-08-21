@@ -1,18 +1,52 @@
 services:
+  db:
+    image: postgres:16-alpine
+    restart: unless-stopped
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-muamalah}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:?POSTGRES_PASSWORD wajib diisi di .env}
+      - POSTGRES_DB=${POSTGRES_DB:-muamalah}
+      # Locale Indonesia untuk pengurutan teks; datanya sendiri UTF-8.
+      - POSTGRES_INITDB_ARGS=--encoding=UTF8
+    volumes:
+      - muamalah-postgres:/var/lib/postgresql/data
+    # Dipetakan ke 127.0.0.1 saja — cukup untuk `npm run dev`, `prisma migrate
+    # dev`, dan `prisma studio` dari mesin sendiri, tanpa memaparkan database ke
+    # jaringan. Porta 5433 dipilih agar tidak bentrok dengan PostgreSQL sistem
+    # yang lazim memakai 5432.
+    ports:
+      - "127.0.0.1:5433:5432"
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U ${POSTGRES_USER:-muamalah} -d ${POSTGRES_DB:-muamalah}"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 10s
+
   bot:
     build: .
     restart: unless-stopped
     env_file:
       - .env
     environment:
-      - DATABASE_URL=file:/app/data/muamalah.db
+      # Host "db" adalah nama service di atas, diselesaikan oleh DNS internal
+      # compose. DATABASE_URL di .env sengaja ditimpa di sini supaya nilai untuk
+      # kontainer tidak bisa tertukar dengan yang dipakai dari mesin sendiri.
+      - DATABASE_URL=postgresql://${POSTGRES_USER:-muamalah}:${POSTGRES_PASSWORD}@db:5432/${POSTGRES_DB:-muamalah}?schema=public
       - DATA_DIR=/app/data
+    # Menunggu Postgres benar-benar siap menerima koneksi, bukan sekadar
+    # kontainernya hidup: entrypoint langsung menjalankan `prisma migrate deploy`
+    # dan akan gagal kalau databasenya belum melayani.
+    depends_on:
+      db:
+        condition: service_healthy
     # Web UI hidup di proses yang sama dengan bot. Port ini sengaja dipetakan ke
     # 127.0.0.1 saja: cookie sesinya ber-flag Secure, jadi paparkan ke internet
     # lewat reverse proxy HTTPS, bukan langsung.
     ports:
       - "127.0.0.1:${WEB_PORT:-3000}:${WEB_PORT:-3000}"
     volumes:
+      # Kini hanya menampung penanda healthcheck; datanya ada di Postgres.
       - muamalah-data:/app/data
     healthcheck:
       test: ["CMD-SHELL", "find /app/data/health -mmin -5 2>/dev/null | grep -q . || exit 1"]
@@ -23,3 +57,4 @@ services:
 
 volumes:
   muamalah-data:
+  muamalah-postgres:

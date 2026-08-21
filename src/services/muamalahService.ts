@@ -42,12 +42,16 @@ export async function daftarMuamalah(opts: {
     ...(opts.jenis ? { jenis: opts.jenis } : {}),
     ...(opts.status ? { status: opts.status } : { status: { not: "BATAL" } }),
     ...(opts.kantorId !== undefined ? { kantorId: opts.kantorId } : {}),
+    // `mode: "insensitive"` wajib di PostgreSQL: `contains` di sana peka huruf
+    // besar-kecil, tidak seperti LIKE di SQLite yang dipakai sebelumnya. Tanpa
+    // ini, mencari "fulan" berhenti menemukan "Fulan" — regresi yang tak
+    // memunculkan galat apa pun, cuma daftar yang kosong.
     ...(opts.cari
       ? {
           OR: [
-            { judul: { contains: opts.cari } },
-            { pihak: { nama: { contains: opts.cari } } },
-            { pihakKedua: { nama: { contains: opts.cari } } },
+            { judul: { contains: opts.cari, mode: "insensitive" as const } },
+            { pihak: { nama: { contains: opts.cari, mode: "insensitive" as const } } },
+            { pihakKedua: { nama: { contains: opts.cari, mode: "insensitive" as const } } },
           ],
         }
       : {}),
@@ -187,7 +191,7 @@ export async function catatAngsuran(input: {
 
 export async function cariPihak(nama: string) {
   return prisma.pihak.findMany({
-    where: { nama: { contains: nama } },
+    where: { nama: { contains: nama, mode: "insensitive" } },
     take: 10,
     orderBy: { nama: "asc" },
   });

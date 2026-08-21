@@ -4,12 +4,15 @@ generator client {
 }
 
 datasource db {
-  provider = "sqlite"
+  provider = "postgresql"
   url      = env("DATABASE_URL")
 }
 
-// SQLite tidak mendukung enum native di Prisma; nilai dibatasi lewat TS union
-// type di src/types.ts dan divalidasi di service layer sebelum ditulis.
+// Nilai berjenis "enum" (jenis akad, status, peran, periode cicilan) sengaja
+// tetap disimpan sebagai String meski PostgreSQL punya enum native: daftarnya
+// hidup di src/types.ts dan sudah divalidasi di service layer, sedangkan enum
+// database menambah satu migrasi tiap kali ada nilai baru — padahal membuka
+// jenis akad baru justru dirancang cukup satu baris di JENIS_AKTIF.
 
 // Kantor perwakilan (kanwil). Setiap operator melayani satu kantor, dan setiap
 // transaksi tercatat di kantor tempat ia terjadi — itulah yang membatasi apa
@@ -31,7 +34,8 @@ model Operator {
   nama           String
   role           String   @default("OPERATOR") // "SUPERADMIN" | "OPERATOR"
   // null hanya sah untuk SUPERADMIN, yang lintas kantor. Operator biasa selalu
-  // terikat satu kantor; validasinya di service layer (SQLite tanpa CHECK di Prisma).
+  // terikat satu kantor; validasinya di service layer (Prisma belum mendukung
+  // CHECK constraint lewat schema).
   kantorId       Int?
   kantor         Kantor?  @relation(fields: [kantorId], references: [id])
   aktif          Boolean  @default(true)

@@ -3,3 +3,6 @@ dist/
 data/
 .env
 *.log
+
+# Salinan database sebelum pindah ke Postgres — berisi data nyata.
+backup/

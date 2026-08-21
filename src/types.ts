@@ -1,5 +1,5 @@
-// SQLite tidak mendukung enum native di Prisma (lihat prisma/schema.prisma),
-// jadi nilai-nilai berikut disimpan sebagai String dan divalidasi di sini.
+// Nilai-nilai berikut disimpan sebagai String di database, bukan enum native,
+// dan divalidasi di sini (lihat alasannya di prisma/schema.prisma).
 
 // SUPERADMIN lintas kantor (lihat semua, kelola kantor & operator); OPERATOR
 // terikat pada satu kantor perwakilan dan hanya melihat transaksi kantornya.

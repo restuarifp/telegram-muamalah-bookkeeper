@@ -240,10 +240,19 @@ Lalu buka `http://localhost:3000` (isi `WEB_SECURE_COOKIE=false` di `.env` untuk
 
 ```bash
 npm install
-cp .env.example .env   # isi BOT_TOKEN, ADMIN_IDS, NEXTCLOUD_* (GROUP_ID opsional)
+cp .env.example .env   # isi BOT_TOKEN, ADMIN_IDS, NEXTCLOUD_*, POSTGRES_PASSWORD
+
+# Database dijalankan lewat compose; portnya dipetakan ke 127.0.0.1:5433 supaya
+# perkakas dari mesin sendiri (prisma, npm run dev) bisa menghubunginya.
+docker compose up -d db
+
 npx prisma migrate dev
 npm run dev
 ```
+
+> `DATABASE_URL` di `.env` menunjuk ke `localhost:5433`; di dalam Docker nilainya
+> ditimpa `docker-compose.yml` dengan host `db`. Keduanya sengaja dipisah agar
+> perintah dari mesin sendiri tidak pernah tertukar sasaran dengan kontainer.
 
 ## Menjalankan dengan Docker
 
@@ -253,20 +262,66 @@ docker compose up -d --build
 docker compose logs -f bot
 ```
 
-Volume datanya kini hanya menyimpan database SQLite (dan penanda healthcheck) — berkas dokumen ada di Nextcloud, jadi backup volume ini tidak lagi mencakup dokumen akad.
+Compose menjalankan dua service: `db` (PostgreSQL 16) dan `bot` (bot + web UI).
+`bot` menunggu `db` benar-benar melayani koneksi — bukan sekadar kontainernya
+hidup — karena entrypoint-nya langsung menjalankan `prisma migrate deploy`.
 
-Backup:
+Datanya ada di volume `muamalah-postgres`; volume `muamalah-data` sekarang cuma
+menampung penanda healthcheck. Dokumen akad tetap di Nextcloud.
+
+### Backup
+
+Backup PostgreSQL berupa dump logis, bukan menyalin berkas volume — menyalin
+direktori data PostgreSQL yang sedang berjalan menghasilkan salinan yang bisa
+saja tidak konsisten.
 
 ```bash
-# Compose memberi awalan nama proyek pada volume, jadi nama sebenarnya adalah
-# <nama-folder-proyek>_muamalah-data — bukan "muamalah-data" saja. Pastikan dulu:
-docker volume ls | grep muamalah-data
+# Cadangkan (gunakan user dari .env)
+docker compose exec -T db pg_dump -U muamalah -d muamalah --clean --if-exists \
+  > backup/muamalah-$(date +%F).sql
 
-docker run --rm -v muamalah-database_muamalah-data:/data -v "$PWD":/backup \
-  alpine tar czf /backup/backup.tar.gz /data
+# Pulihkan
+docker compose exec -T db psql -U muamalah -d muamalah < backup/muamalah-2026-08-21.sql
 ```
 
-> Salah menyebut nama volume di sini tidak menghasilkan error: Docker justru membuat volume kosong baru dan menghasilkan arsip kosong. Cek isi arsipnya (`tar tzf backup.tar.gz`) setelah backup pertama.
+> Periksa hasil dump pertama Anda (`grep -c "INSERT\|COPY" berkas.sql`, atau
+> sekadar lihat ukurannya): perintah yang gagal tetap menghasilkan berkas — hanya
+> saja kosong.
+
+## Pindah dari SQLite (instalasi lama)
+
+Sistem ini semula memakai SQLite. Instalasi yang masih membawa `muamalah.db`
+dipindahkan sekali dengan `scripts/migrasi-sqlite-ke-postgres.ts`:
+
+```bash
+# 1. Ambil berkas lamanya dari volume, sebelum menyentuh apa pun
+docker compose cp bot:/app/data/muamalah.db ./backup/muamalah-lama.db
+
+# 2. Siapkan skema kosong di PostgreSQL
+docker compose up -d db
+npx prisma migrate deploy
+
+# 3. Pindahkan isinya
+npm run db:pindah-dari-sqlite backup/muamalah-lama.db
+```
+
+Yang dijaga skrip itu:
+
+- **Id dipertahankan.** Dokumen, audit log, dan pengingat saling menunjuk lewat
+  id, dan folder Nextcloud tiap transaksi dinamai memakai id-nya — id yang
+  bergeser akan memutus keduanya.
+- **Sequence disetel ulang** ke id tertinggi tiap tabel. Menyalin baris berikut
+  id-nya tidak ikut menggeser sequence `SERIAL`, jadi tanpa langkah ini transaksi
+  berikutnya akan mencoba memakai id 1 dan langsung bentrok.
+- **Dua format tanggal ikut ditangani.** Di SQLite, baris yang ditulis Prisma
+  menyimpan tanggal sebagai milidetik, sedangkan baris dari
+  `DEFAULT CURRENT_TIMESTAMP` menyimpannya sebagai teks — keduanya nyata ada di
+  satu database yang sama.
+- **Menolak jalan bila tabel tujuan sudah berisi**, supaya menjalankannya dua
+  kali tidak menggandakan apa pun.
+
+Riwayat migrasi SQLite disimpan di `prisma/arsip-migrasi-sqlite/` sebagai catatan;
+`prisma/migrations` dimulai ulang dari satu migrasi `init` untuk PostgreSQL.
 
 ## Uji coba tanpa menunggu cron
 
